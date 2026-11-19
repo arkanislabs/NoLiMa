@@ -1,6 +1,6 @@
 # Smoke test: 1 haystack x 2 tests x 3 depths = 6 requests.
 # Run from evaluation/:
-#   PYTHONPATH=../ uv run python -u run_tests.py --config run_config/smoke_test_deepseek_v4.1_flash_1017.yaml
+#   PYTHONPATH=../ uv run python -u run_tests.py --config run_config/smoke_test_deepseek_v4.1_flash_1017_1K.yaml
 model_name: "deepseek_v4.1_flash_1017_openrouter"
 model_configs_dir: "./model_configs/"
 needle_set_path: "../data/needlesets/needle_set.json"
