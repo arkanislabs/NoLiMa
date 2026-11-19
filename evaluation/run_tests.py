@@ -7,7 +7,7 @@
 
 import os
 import json
-from typing import Union
+from typing import List, Optional, Union
 from tqdm import tqdm
 import time
 from copy import copy
@@ -38,6 +38,8 @@ if __name__ == "__main__":
     parser.add_argument("--log_placements_dir", type=str, default="", help="Directory to save needle placements for debugging")
     parser.add_argument("--base_seed", type=int, default=42, help="Base seed for random character selection")
     parser.add_argument("--prevent_duplicate_tests", type=bool, default=True, help="Prevent duplicate tests")
+    parser.add_argument("--test_names", type=Optional[List[str]], default=None, help="Run only these tests, named <exp_id>_<test_id>_<question_type> (e.g. 0401_T17_C02_onehop); default runs all")
+    parser.add_argument("--haystack_files", type=Optional[List[str]], default=None, help="Run only these files from haystack_dir (e.g. rand_book_1.txt); default runs all")
 
     args = parser.parse_args()
 
@@ -78,8 +80,21 @@ if __name__ == "__main__":
                 tests[-1]["retrieval_question"] = full_question
                 tests[-1]["distractor"] = full_distractor
 
+    if args.test_names is not None:
+        unknown_tests = set(args.test_names) - {test["test_name"] for test in tests}
+        if unknown_tests:
+            raise ValueError(f"Unknown test_names (not in {args.needle_set_path}): {sorted(unknown_tests)}")
+        tests = [test for test in tests if test["test_name"] in args.test_names]
+
     haystacks = os.listdir(args.haystack_dir)
+    if args.haystack_files is not None:
+        unknown_haystacks = set(args.haystack_files) - set(haystacks)
+        if unknown_haystacks:
+            raise ValueError(f"Unknown haystack_files (not in {args.haystack_dir}): {sorted(unknown_haystacks)}")
     for haystack_no, haystack in enumerate(haystacks):
+        # Filter inside the loop so haystack_no, and therefore the seed, matches a full run
+        if args.haystack_files is not None and haystack not in args.haystack_files:
+            continue
         haystack_path = os.path.join(args.haystack_dir, haystack)
         haystack_name = haystack.split(".")[0]
 
