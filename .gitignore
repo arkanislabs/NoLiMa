@@ -1,0 +1,6 @@
+# Downloaded data (fetch with data/download_NoLiMa_data.sh)
+/data/needlesets/
+/data/haystack/
+
+# IDE
+.idea/
