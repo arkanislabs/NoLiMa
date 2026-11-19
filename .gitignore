@@ -2,6 +2,9 @@
 /data/needlesets/
 /data/haystack/
 
+# Evaluation results
+/evaluation/results/
+
 # IDE
 .idea/
 
