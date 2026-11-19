@@ -4,7 +4,7 @@
 help:
 	@echo "make install         Install core dependencies (API inference: OpenAI, Azure, Gemini/Vertex AI, AWS Bedrock)"
 	@echo "make install-local   Install core + vllm for local inference (vllm is installed on Linux only)"
-	@echo "make gather-results  Summarize evaluation/results/ into evaluation/results/gathered_results.csv"
+	@echo "make gather-results  Summarize evaluation/results/ into gathered_results.csv and report.md there"
 
 check-uv:
 	@command -v uv >/dev/null 2>&1 || { echo "uv is required: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }

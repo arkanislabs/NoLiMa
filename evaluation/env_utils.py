@@ -38,6 +38,27 @@ def load_env(dotenv_path: Union[str, Path] = DEFAULT_DOTENV_PATH) -> bool:
     return load_dotenv(dotenv_path, override=False)
 
 
+def redact_secrets(value: Any) -> Any:
+    """
+    Returns a copy of a (not yet expanded) config that is safe to write to disk:
+    values of secret-looking keys (``*key``, ``*secret*``, ``*password*``) are replaced
+    with ``"<redacted>"`` unless they are a plain ``${VAR_NAME}`` reference.
+    """
+    if isinstance(value, dict):
+        redacted = {}
+        for k, v in value.items():
+            name = k.lower()
+            is_secret = name.endswith("key") or "secret" in name or "password" in name
+            if is_secret and not (isinstance(v, str) and _ENV_REFERENCE.fullmatch(v)):
+                redacted[k] = "<redacted>"
+            else:
+                redacted[k] = redact_secrets(v)
+        return redacted
+    if isinstance(value, list):
+        return [redact_secrets(v) for v in value]
+    return value
+
+
 def expand_env_vars(value: Any, source: str = "config") -> Any:
     """
     Recursively replaces ``${VAR_NAME}`` references in strings (including those

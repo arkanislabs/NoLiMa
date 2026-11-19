@@ -17,7 +17,7 @@ from copy import deepcopy
 import numpy as np
 
 from async_api_connector import APIConnector
-from env_utils import load_env, expand_env_vars
+from env_utils import load_env, expand_env_vars, redact_secrets
 
 from jsonargparse import ArgumentParser, ActionConfigFile
 from data.book_haystack import BookHaystack
@@ -57,7 +57,10 @@ class NoLiMa_Tester:
         
         load_env()
         with open(self.model_config_path, "r") as file:
-            self.model_config = expand_env_vars(json.load(file), source=self.model_config_path)
+            raw_model_config = json.load(file)
+        # Logged in each result file: ${VAR} references stay unexpanded and literal secrets are redacted
+        self.logged_model_config = redact_secrets(raw_model_config)
+        self.model_config = expand_env_vars(raw_model_config, source=self.model_config_path)
 
         self.api_connector = APIConnector(
             **self.model_config
@@ -167,6 +170,8 @@ class NoLiMa_Tester:
         if self.distractor is not None:
             outputs["distractor"] = self.distractor
         outputs["test_hash"] = self.get_hash(outputs)
+        # Added after hashing so config edits (e.g. timeout) don't invalidate existing results
+        outputs["model_config"] = self.logged_model_config
         results_path = os.path.join(self.results_dir, f"{self.eval_name}.json")
         if os.path.exists(results_path):
             print(f"Results already exist at {results_path}")

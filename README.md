@@ -130,6 +130,7 @@ The needle set and haystack data will be downloaded to the `data` directory from
     - All outputs are automatically saved to the results directory specified in each run_config file.
 4. **Gathering the results**
     - Run `make gather-results` (or `python evaluation/gather_results.py [RESULTS_DIR ...]`) to gather the results from the output files into `evaluation/results/gathered_results.csv`, containing the accuracy of each test.
+    - The same command writes `evaluation/results/report.md`: per run, the score at each context length, the base score, threshold and effective length (as defined above), per-test scores, cut-off answers, cost and the model config. Each result file also records the model config it was run with (`${VAR}` references are kept unexpanded and literal secrets are redacted).
 
 ### Additional Notes
 You can find various needle sets (e.g., CoT-style, multiple choice, direct, distractor-included) in `data/needlesets`.
