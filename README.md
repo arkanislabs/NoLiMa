@@ -72,10 +72,13 @@ Below are the general steps to evaluate models, whether serving them locally or 
 
 ---
 ### 1. Installing Requirements
-Install the required packages by running:
+Dependencies are managed with [uv](https://docs.astral.sh/uv/getting-started/installation/) (install it first). Then, from the repository root:
 ```bash
-pip install -r requirements.txt
+make install        # API-based models (OpenAI, Azure OpenAI, Gemini/Vertex AI, AWS Bedrock)
+make install-local  # also installs vllm for locally served models (Linux + NVIDIA GPU)
+source .venv/bin/activate
 ```
+Both commands create a Python 3.12 environment in `.venv` from the pinned versions in `uv.lock`. `make install` keeps the environment in sync with the core dependencies, so running it after `make install-local` removes vllm.
 
 ### 2. Downloading Data
 Download the NoLiMa dataset by running:
