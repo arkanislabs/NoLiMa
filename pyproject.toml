@@ -15,7 +15,7 @@ dependencies = [
     "langchain-aws==0.2.9",
     "langchain-core==0.3.26",
     "tenacity==9.0.0",
-    "jsonargparse==4.34.0",
+    "jsonargparse==4.35.0",
     "httpx<0.28",
     "numpy",
     "tqdm",

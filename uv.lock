@@ -1405,14 +1405,14 @@ wheels = [
 
 [[package]]
 name = "jsonargparse"
-version = "4.34.0"
+version = "4.35.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a3/6e/d2cb1f3791ac7798aebcdec6dc97650f981fbda3047a09cfa15058d5552c/jsonargparse-4.34.0.tar.gz", hash = "sha256:88b3ff0beaff40909dc69244f0527b054f8be0132086c72aa7e1d99414024b43", size = 190143, upload-time = "2024-11-08T05:51:02.958Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a4/fe/5d9aa1a04d0788fc87069df43545ac00a5ecd6790def90d9e43adea9f15d/jsonargparse-4.35.0.tar.gz", hash = "sha256:815ecd190e4004d2ce69b184fe16915f8f81fd32ae3e479fa37fbb9b89130446", size = 190521, upload-time = "2024-12-16T06:58:38.452Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/53/6f/93a76515e581b2008104f21281ae673950fe642a65cbeb0647687c6ae1a0/jsonargparse-4.34.0-py3-none-any.whl", hash = "sha256:a3eb8a9a289332066b1b33463efa49d5d2a8d729b6cb60e9e30231d0c19dfb13", size = 210592, upload-time = "2024-11-08T05:51:00.912Z" },
+    { url = "https://files.pythonhosted.org/packages/36/7a/cc99579675475079d9a488cd0f22385bfa0ff1788126a25854c67b6a309a/jsonargparse-4.35.0-py3-none-any.whl", hash = "sha256:8298ea953987fb41ed074e8802c77bb19166d632d972b23383cad63da7d7486b", size = 211002, upload-time = "2024-12-16T06:58:34.355Z" },
 ]
 
 [[package]]
@@ -1926,7 +1926,7 @@ requires-dist = [
     { name = "google-cloud-aiplatform", extras = ["tokenization"], specifier = "==1.74.0" },
     { name = "google-genai", specifier = "==0.3.0" },
     { name = "httpx", specifier = "<0.28" },
-    { name = "jsonargparse", specifier = "==4.34.0" },
+    { name = "jsonargparse", specifier = "==4.35.0" },
     { name = "langchain-aws", specifier = "==0.2.9" },
     { name = "langchain-core", specifier = "==0.3.26" },
     { name = "numpy" },
