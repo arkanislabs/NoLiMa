@@ -251,7 +251,9 @@ class APIConnector:
             
 
             output = {
-                "response": completion.choices[0].message.content,
+                # content is None when reasoning uses the whole max_tokens budget (finish_reason "length");
+                # treat it as an empty (wrong) answer instead of crashing the scorer
+                "response": completion.choices[0].message.content or "",
                 "prompt_tokens": completion.usage.prompt_tokens,
                 "completion_tokens": completion.usage.completion_tokens,
                 "total_tokens": completion.usage.total_tokens,
