@@ -17,6 +17,7 @@ from copy import deepcopy
 import numpy as np
 
 from async_api_connector import APIConnector
+from env_utils import load_env, expand_env_vars
 
 from jsonargparse import ArgumentParser, ActionConfigFile
 from data.book_haystack import BookHaystack
@@ -54,8 +55,9 @@ class NoLiMa_Tester:
         if not os.path.exists(self.model_config_path):
             raise FileNotFoundError(f"Model configuration for {model_name} not found in {model_configs_dir}")
         
+        load_env()
         with open(self.model_config_path, "r") as file:
-            self.model_config = json.load(file)
+            self.model_config = expand_env_vars(json.load(file), source=self.model_config_path)
 
         self.api_connector = APIConnector(
             **self.model_config

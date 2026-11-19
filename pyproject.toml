@@ -19,6 +19,7 @@ dependencies = [
     "httpx<0.28",
     "numpy",
     "tqdm",
+    "python-dotenv>=1.2.4",
 ]
 
 [dependency-groups]

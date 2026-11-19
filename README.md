@@ -102,6 +102,13 @@ The needle set and haystack data will be downloaded to the `data` directory from
 
 ### 3B. API-Based Models
 
+- **Provide your API keys in a `.env` file**  
+  - Copy the template and fill in the keys you need (`.env` is git-ignored):
+    ```bash
+    cp .env.example .env
+    ```
+  - Model configs reference keys as `${VAR_NAME}` (e.g. `"api_key": "${OPENROUTER_API_KEY}"`). The values are filled in from the environment when the config is loaded, and variables already exported in your shell take precedence over `.env`. A missing variable stops the run with an error that names it.
+  - For OpenRouter, set `OPENROUTER_API_KEY` (and `HF_TOKEN` for gated Hugging Face tokenizers such as `meta-llama/*`), then use `evaluation/model_configs/llama_3.3_70b_openrouter.json` as a starting point.
 - **Create or modify a model configuration for your API-based service**  
   - For example, use the existing config templates in the `evaluation/model_configs` folder.  
   - Note that some APIs may require additional credentials or authentication (AWS, Google Auth, etc.).

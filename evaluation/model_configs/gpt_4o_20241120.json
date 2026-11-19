@@ -1,7 +1,7 @@
 {
     "model": "gpt-4o-2024-11-20",
-    "api_key": "[[YOUR_API_KEY_HERE]]",
-    "api_url": "[[API_URL]]",
+    "api_key": "${AZURE_OPENAI_API_KEY}",
+    "api_url": "${AZURE_OPENAI_ENDPOINT}",
     "azure_api_version": "2024-10-21",
     "api_provider": "azure-openai",
     "max_tokens": 192,
