@@ -5,7 +5,7 @@ model_name: "deepseek_v4.1_flash_1017_openrouter"
 model_configs_dir: "./model_configs/"
 needle_set_path: "../data/needlesets/needle_set.json"
 haystack_dir: "../data/haystack/rand_shuffle"
-parent_results_dir: "./results_smoke_deepseek_v4.1_flash_1017_openrouter/CL1K/"
+parent_results_dir: "./results/smoke_deepseek_v4.1_flash_1017_openrouter/CL1K/"
 context_length: 1000
 document_depth_percent_min: 0
 document_depth_percent_max: 100
