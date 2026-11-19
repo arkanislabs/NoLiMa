@@ -129,7 +129,7 @@ The needle set and haystack data will be downloaded to the `data` directory from
 3. **Collect the results**
     - All outputs are automatically saved to the results directory specified in each run_config file.
 4. **Gathering the results**
-    - Using the `evaluation/gather_results.ipynb` notebook, you can easily gather the results from the output files and generate a csv file containing the accuracy of each test.
+    - Run `make gather-results` (or `python evaluation/gather_results.py [RESULTS_DIR ...]`) to gather the results from the output files into `evaluation/results/gathered_results.csv`, containing the accuracy of each test.
 
 ### Additional Notes
 You can find various needle sets (e.g., CoT-style, multiple choice, direct, distractor-included) in `data/needlesets`.
