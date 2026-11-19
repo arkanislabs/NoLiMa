@@ -257,9 +257,10 @@ class APIConnector:
                 "total_tokens": completion.usage.total_tokens,
                 "finish_reason": completion.choices[0].finish_reason,
                 "cached_tokens": completion.usage.prompt_tokens_details.cached_tokens if completion.usage.prompt_tokens_details else None,
+                "reasoning_tokens": completion.usage.completion_tokens_details.reasoning_tokens if completion.usage.completion_tokens_details else None,
+                # USD cost; only some providers (e.g. OpenRouter) report it
+                "cost": getattr(completion.usage, "cost", None),
             }
-            if self.model_config.get("openai_thinking_model", False):
-                output["reasoning_tokens"] = completion.usage.completion_tokens_details.reasoning_tokens
             return output
 
         elif self.api_provider == "gemini":
