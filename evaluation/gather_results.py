@@ -170,6 +170,17 @@ def summarize_runs(loaded: list) -> dict:
     return summaries
 
 
+def summarize_models(loaded: list) -> dict:
+    """Request counts and cost per model_name, across all runs. Returns {model_name: summary}."""
+    models = defaultdict(lambda: {"runs": set(), "n": 0, "costs": []})
+    for _, data in loaded:
+        model = models[data["model_name"]]
+        model["runs"].add(run_name(data))
+        model["n"] += len(data["results"])
+        model["costs"] += [res.get("cost") for res in data["results"]]
+    return dict(sorted(models.items()))
+
+
 # ---------------------------------------------------------------- formatting
 
 def format_length(length: int) -> str:
@@ -206,7 +217,7 @@ def config_differences(configs: list) -> list:
     return [k for k in keys if len({json.dumps(config.get(k), sort_keys=True) for config in configs}) > 1]
 
 
-def build_report(summaries: dict, results_dirs: list) -> str:
+def build_report(summaries: dict, models: dict, results_dirs: list) -> str:
     all_lengths = sorted({length for summary in summaries.values() for length in summary["lengths"]})
     total_requests = sum(stats["n"] for s in summaries.values() for stats in s["length_stats"].values())
     total_cost = sum_or_none([sum_or_none(stats["cost"]) for s in summaries.values() for stats in s["length_stats"].values()])
@@ -235,12 +246,22 @@ def build_report(summaries: dict, results_dirs: list) -> str:
         "**Effective length**: the largest context length scoring at least 85% of the base score (the threshold). "
         "Scores at or above the threshold are <ins>underlined</ins>; scores below 50% of the base score are *italicized*.",
         "",
+        "## Cost by model",
+        "",
     ]
+    rows = []
+    for model_name, m in models.items():
+        missing = sum(cost is None for cost in m["costs"])
+        note = "" if not missing else ("not reported" if missing == m["n"] else f"{missing:,} requests without a reported cost")
+        rows.append([model_name, ", ".join(f"`{run}`" for run in sorted(m["runs"])), f"{m['n']:,}", format_cost(sum_or_none(m["costs"])), note])
+    lines += md_table(["Model", "Runs", "Requests", "Cost (USD)", "Note"], rows)
+    lines += ["", "Cost is the sum of what the provider reported per request (e.g. OpenRouter's `usage.cost`).", ""]
 
     for run, s in summaries.items():
         lines += [f"## Run `{run}`", ""]
         lines += [f"- **Model:** {', '.join(s['model_names'])}"]
         lines += [f"- **Result files:** {s['n_files']}"]
+        lines += [f"- **Cost:** {format_cost(sum_or_none([sum_or_none(stats['cost']) for stats in s['length_stats'].values()]))}"]
         if len(s["configs"]) == 1:
             config = s["configs"][0]
             settings = ", ".join(f"`{k}` = `{json.dumps(config[k])}`" for k in ("model", "max_tokens", "temperature", "top_p") if k in config)
@@ -324,7 +345,7 @@ def main() -> None:
     write_csv([get_summarized_result(data) for _, data in loaded], args.output)
     print(f"Wrote {len(loaded)} rows to {args.output}")
 
-    report = build_report(summarize_runs(loaded), args.results_dirs)
+    report = build_report(summarize_runs(loaded), summarize_models(loaded), args.results_dirs)
     os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
     with open(args.report, "w") as f:
         f.write(report + "\n")
