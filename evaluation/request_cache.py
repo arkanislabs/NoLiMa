@@ -75,6 +75,21 @@ def is_request_cache_dir(path: str) -> bool:
     return os.path.isfile(os.path.join(path, CACHE_MARKER))
 
 
+def write_json_atomic(path: str, data: Any, **dump_kwargs) -> None:
+    """
+    Writes JSON to a temp file next to `path`, then swaps it in with os.replace, so a crash or a
+    serialization error never leaves a half-written file and keeps any previous version intact.
+    """
+    tmp_path = f"{path}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, **dump_kwargs)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 class RequestCache:
     def __init__(self, cache_dir: str = DEFAULT_REQUEST_CACHE_DIR) -> None:
         self.cache_dir = cache_dir
@@ -112,14 +127,7 @@ class RequestCache:
             "request": compact_request(request),
             "response": response,
         }
-        tmp_path = f"{path}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
-        try:
-            with open(tmp_path, "w") as f:
-                json.dump(entry, f, indent=1, ensure_ascii=False)
-            os.replace(tmp_path, path)
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+        write_json_atomic(path, entry, indent=1, ensure_ascii=False)
         return path
 
     async def fetch(self, request: dict, send: Callable[[dict], Awaitable[dict]]) -> Tuple[dict, bool]:

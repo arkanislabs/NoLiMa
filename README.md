@@ -127,7 +127,8 @@ The needle set and haystack data will be downloaded to the `data` directory from
    ./run_tests.sh
    ```
 3. **Collect the results**
-    - All outputs are automatically saved to the results directory specified in each run_config file.
+    - All outputs are automatically saved to the results directory specified in each run_config file: one file per test, haystack and context length, `<results_dir>/<model>_book_<test>_<haystack>_CL<length>.json`.
+    - Re-running a config overwrites these files. Requests already in the request cache (below) are not sent again, so re-running, or resuming an interrupted run, only pays for what is missing; a changed model config (e.g. `max_tokens`) runs the new settings.
     - Each run prints its cost per test and in total: **current** is what the requests sent to the API cost, **total** also counts the requests answered from the request cache (at the price recorded when they were first sent).
 
 #### Request cache
@@ -137,7 +138,7 @@ The needle set and haystack data will be downloaded to the `data` directory from
 - Each per-request result records `request_hash` (the entry's file name) and `request_cache_hit`.
 - To send requests again, delete their entries (or a whole model folder). To bypass the cache for a run, set `use_request_cache: false`.
 - Responses with `finish_reason: "error"` are not cached, and when a request fails, the responses that did arrive are already cached, so a re-run only sends the failed requests.
-- Separately, `prevent_duplicate_tests` (on by default) still skips a test when its results directory already has a result file for the same test settings.
+- Result files from before re-runs overwrote results have a timestamp in their name and are never overwritten, and their prompts are not in the cache. Delete them, or move them outside `evaluation/results/`, before re-running into the same folder: `gather_results` groups files by the `result_dir` recorded inside each file, not by where the file sits, so leftover old files make the report count those tests twice (it warns when it sees this).
 4. **Gathering the results**
     - Run `make gather-results` (or `python evaluation/gather_results.py [RESULTS_DIR ...]`) to gather the results from the output files into `evaluation/results/gathered_results.csv`, containing the accuracy of each test.
     - The same command writes `evaluation/results/report.md`: per run, the score at each context length, the base score, threshold and effective length (as defined above), per-test scores, cut-off answers, cost and the model config. Cost is shown as **current** (requests sent to the API when the results were produced) and **total** (also counting requests answered from the request cache); the CSV has the matching `current_cost`, `total_cost` and `n_request_cache_hits` columns. The request cache directory is skipped. Each result file also records the model config it was run with (`${VAR}` references are kept unexpanded and literal secrets are redacted).

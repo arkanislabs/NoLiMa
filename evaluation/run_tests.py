@@ -38,7 +38,6 @@ if __name__ == "__main__":
     parser.add_argument("--metric", type=str, default="EM", help="Evaluation metric")
     parser.add_argument("--log_placements_dir", type=str, default="", help="Directory to save needle placements for debugging")
     parser.add_argument("--base_seed", type=int, default=42, help="Base seed for random character selection")
-    parser.add_argument("--prevent_duplicate_tests", type=bool, default=True, help="Prevent duplicate tests")
     parser.add_argument("--test_names", type=Optional[List[str]], default=None, help="Run only these tests, named <exp_id>_<test_id>_<question_type> (e.g. 0401_T17_C02_onehop); default runs all")
     parser.add_argument("--haystack_files", type=Optional[List[str]], default=None, help="Run only these files from haystack_dir (e.g. rand_book_1.txt); default runs all")
     parser.add_argument("--request_cache_dir", type=str, default=DEFAULT_REQUEST_CACHE_DIR, help="Directory of the LLM request cache, shared by all runs")
@@ -125,7 +124,6 @@ if __name__ == "__main__":
                 log_placements_dir=args.log_placements_dir,
                 test_name=test["test_name"],
                 seed=test["seed"] + haystack_no,
-                prevent_duplicate=args.prevent_duplicate_tests,
                 distractor=test["distractor"],
                 request_cache_dir=args.request_cache_dir,
                 use_request_cache=args.use_request_cache

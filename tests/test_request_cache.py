@@ -3,6 +3,8 @@ import hashlib
 import json
 import os
 
+import pytest
+
 from request_cache import (
     CACHE_MARKER,
     INLINE_TEXT_LIMIT,
@@ -12,6 +14,7 @@ from request_cache import (
     is_request_cache_dir,
     request_key,
     should_cache,
+    write_json_atomic,
 )
 
 REQ = {
@@ -160,3 +163,18 @@ def test_unknown_cost_is_not_reported_as_zero():
     assert current_cost({"cost": None, "request_cache_hit": True}) is None
     results = [{"cost": None, "request_cache_hit": False}, {"cost": None, "request_cache_hit": True}]
     assert cost_summary(results) == "Cost: current n/a, total n/a (requests: 1 sent, 1 from the request cache)"
+
+
+def test_write_json_atomic_replaces_the_file(tmp_path):
+    path = tmp_path / "r.json"
+    write_json_atomic(str(path), {"a": 1})
+    write_json_atomic(str(path), {"a": 2})
+    assert json.loads(path.read_text()) == {"a": 2} and os.listdir(tmp_path) == ["r.json"]
+
+
+def test_write_json_atomic_keeps_the_old_file_when_writing_fails(tmp_path):
+    path = tmp_path / "r.json"
+    write_json_atomic(str(path), {"a": 1})
+    with pytest.raises(TypeError):
+        write_json_atomic(str(path), {"a": object()})
+    assert json.loads(path.read_text()) == {"a": 1} and os.listdir(tmp_path) == ["r.json"]
