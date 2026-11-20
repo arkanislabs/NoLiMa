@@ -127,8 +127,9 @@ The needle set and haystack data will be downloaded to the `data` directory from
    ./run_tests.sh
    ```
 3. **Collect the results**
-    - All outputs are automatically saved to the results directory specified in each run_config file: one file per test, haystack and context length, `<results_dir>/<model>_book_<test>_<haystack>_CL<length>.json`.
-    - Re-running a config overwrites these files. Requests already in the request cache (below) are not sent again, so re-running, or resuming an interrupted run, only pays for what is missing; a changed model config (e.g. `max_tokens`) runs the new settings.
+    - All outputs are automatically saved under the `parent_results_dir` of each run_config file: one file per test, haystack and context length, `<parent_results_dir>/<test>/<model>_book_<test>_<haystack>_CL<length>.json`.
+    - Re-running a config overwrites these files. Requests already in the request cache (below) are not sent again, so re-running, or resuming an interrupted run, only pays for requests that aren't cached yet; a changed model config (e.g. `max_tokens`) runs the new settings. Two exceptions: with `use_request_cache: false` every request is sent again, and results produced before the request cache existed aren't in it, so re-running their config sends all of their requests again (use `test_names` / `haystack_files` to run only what is missing).
+    - The file name only covers model, test, haystack file name and context length. Any other change (needle set, `haystack_dir`, depth settings, seed, metric) needs its own `parent_results_dir`; otherwise the new results replace the old ones, with a warning naming the settings that differ.
     - Each run prints its cost per test and in total: **current** is what the requests sent to the API cost, **total** also counts the requests answered from the request cache (at the price recorded when they were first sent).
 
 #### Request cache

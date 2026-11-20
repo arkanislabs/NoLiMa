@@ -139,3 +139,12 @@ def test_changed_model_config_runs_again(make_tester, sent, tmp_path):
     assert len(sent) == 6 and {r["max_tokens"] for r in sent} == {10, 20}
     (result_file,) = (tmp_path / "run").iterdir()
     assert json.loads(result_file.read_text())["model_config"]["max_tokens"] == 20
+
+
+def test_overwriting_results_from_other_settings_warns(make_tester, sent, tmp_path, capsys):
+    make_tester(str(tmp_path / "run")).evaluate()
+    make_tester(str(tmp_path / "run")).evaluate()
+    assert "different settings" not in capsys.readouterr().out  # a plain re-run is expected to overwrite
+    make_tester(str(tmp_path / "run"), needle="Actually, {CHAR} has seen the Kiasma museum.").evaluate()
+    out = capsys.readouterr().out
+    assert "Warning: overwriting" in out and "produced with different settings: needle." in out

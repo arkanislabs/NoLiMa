@@ -30,6 +30,26 @@ def result_file_name(model_name: str, test_name: str, haystack_path: str, contex
     return "_".join(part for part in (model_name, "book", test_name, haystack_name, f"CL{context_length}") if part)
 
 
+# Not test settings: the name, the outcome, and the model config (changing it and re-running is expected)
+_NOT_SETTINGS = {"eval_name", "results", "model_config"}
+
+
+def changed_settings(existing_path: str, outputs: dict) -> list:
+    """
+    Top-level settings (needle, haystack path, depths, seed, ...) that differ between an existing result
+    file and the one about to replace it. The file name only encodes model, test, haystack file name and
+    context length, so a different experiment pointed at the same folder would replace it silently.
+    """
+    try:
+        with open(existing_path, "r") as file:
+            existing = json.load(file)
+    except (OSError, ValueError):
+        return []
+    new = json.loads(json.dumps(outputs))  # compare as stored (e.g. tuples become lists)
+    keys = (set(existing) | set(new)) - _NOT_SETTINGS
+    return sorted(key for key in keys if existing.get(key) != new.get(key))
+
+
 class NoLiMa_Tester:
     def __init__(
         self,
@@ -243,7 +263,12 @@ class NoLiMa_Tester:
             
         # One file per model, test, haystack and context length; written atomically so a crash keeps the previous version
         if os.path.exists(results_path):
-            print(f"Overwriting {results_path}")
+            changed = changed_settings(results_path, outputs)
+            if changed:
+                print(f"Warning: overwriting {results_path}, which was produced with different settings: {', '.join(changed)}. "
+                      "Use a separate parent_results_dir to keep both.")
+            else:
+                print(f"Overwriting {results_path}")
         write_json_atomic(results_path, outputs, indent=4)
         
         print(f"Results saved at {results_path}")
