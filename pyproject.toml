@@ -23,6 +23,10 @@ dependencies = [
 ]
 
 [dependency-groups]
+# Tests: uv syncs this group by default (make test).
+dev = [
+    "pytest>=8.3",
+]
 # Local inference: serve open models with vllm (Linux + NVIDIA GPU only).
 local = [
     "vllm>=0.6; sys_platform == 'linux'",
@@ -32,3 +36,8 @@ local = [
 package = false
 # sentencepiece 0.2.3 ships no Intel-macOS wheel (it fails to build from source there).
 constraint-dependencies = ["sentencepiece<0.2.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# evaluation/ modules import each other as top-level modules; data/ is imported from the repo root
+pythonpath = ["evaluation", "."]
