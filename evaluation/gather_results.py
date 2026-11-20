@@ -14,7 +14,8 @@ model_config.<field> columns) and
 Report: per run (a parent_results_dir such as results/<run>/CL1K/), the score at
 each context length, base score, threshold and effective length as defined in
 the NoLiMa paper, plus per-test scores, cut-offs, current and total cost and the
-model config.
+model config, and a warning when a run holds more than one file for the same
+test, haystack and context length (those requests would be counted twice).
 
 The request cache (evaluation/results/request_cache/) is skipped: its entries are
 not result files.
@@ -29,7 +30,7 @@ import argparse
 import csv
 import json
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 
 import numpy as np
@@ -100,9 +101,8 @@ def get_summarized_result(data: dict) -> dict:
     data["total_cost"] = sum_or_none([res.get("cost") for res in results])
     for key, value in (data.pop("model_config", None) or {}).items():
         data[f"model_config.{key}"] = value
-    if "test_hash" in data:
-        del data["test_hash"]
-        del data["seed"]
+    data.pop("test_hash", None)   # only in files written before re-runs overwrote results
+    data.pop("seed", None)
     del data["result_dir"]
     del data["results"]
     return data
@@ -158,6 +158,12 @@ def summarize_runs(loaded: list) -> dict:
             else:
                 files_without_config += 1
 
+        # Files beyond the first for the same test cell; a re-run overwrites its file, so these are
+        # leftovers such as timestamped files from before that, and they count requests twice
+        cells = Counter((data["model_name"], data["test_name"], os.path.basename(data.get("haystack_path", "")), data["context_length"])
+                        for _, data in files)
+        repeated_files = sum(count - 1 for count in cells.values())
+
         lengths = sorted(length_stats)
         scores = {length: length_stats[length]["correct"] / length_stats[length]["n"] for length in lengths}
 
@@ -184,6 +190,7 @@ def summarize_runs(loaded: list) -> dict:
             "effective": effective,
             "configs": list(configs.values()),
             "files_without_config": files_without_config,
+            "repeated_files": repeated_files,
         }
     return summaries
 
@@ -306,6 +313,10 @@ def build_report(summaries: dict, models: dict, results_dirs: list) -> str:
         lines += [""]
 
         warnings = []
+        if s["repeated_files"]:
+            warnings.append(f"{s['repeated_files']} result file(s) repeat a model, test, haystack and context length already in this run "
+                            "(e.g. timestamped files from before re-runs overwrote results), so those requests are counted more than once. "
+                            "Delete the older files.")
         if s["files_without_config"]:
             warnings.append(f"{s['files_without_config']} of {s['n_files']} result files predate model-config logging, so their settings can't be checked.")
         if len(s["configs"]) > 1:

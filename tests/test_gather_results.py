@@ -42,3 +42,18 @@ def test_report_shows_current_and_total_cost():
     assert "- **Requests:** 3 (1 from the request cache)" in report
     assert "- **Cost:** current $0.0050, total $0.0070" in report
     assert "| Cut off | Avg reasoning tokens | Current cost | Total cost |" in report
+
+
+def test_summarized_result_drops_seed_without_test_hash():
+    data = result_data()
+    del data["test_hash"]
+    s = get_summarized_result(data)
+    assert "seed" not in s and "test_hash" not in s
+
+
+def test_report_warns_about_repeated_result_files():
+    loaded = [("old.json", result_data()), ("new.json", result_data())]
+    report = build_report(summarize_runs(loaded), summarize_models(loaded), ["results"])
+    assert "1 result file(s) repeat a model, test, haystack and context length already in this run" in report
+    single = [("new.json", result_data())]
+    assert "repeat a model, test, haystack" not in build_report(summarize_runs(single), summarize_models(single), ["results"])
