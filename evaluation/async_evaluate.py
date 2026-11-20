@@ -18,6 +18,7 @@ import numpy as np
 
 from async_api_connector import APIConnector
 from env_utils import load_env, expand_env_vars, redact_secrets
+from request_cache import RequestCache, DEFAULT_REQUEST_CACHE_DIR, cost_summary
 
 from jsonargparse import ArgumentParser, ActionConfigFile
 from data.book_haystack import BookHaystack
@@ -47,7 +48,9 @@ class NoLiMa_Tester:
         log_placements_dir: str = "",
         metric: str = "EM",
         prevent_duplicate: bool = True,
-        distractor: Union[str, None] = None
+        distractor: Union[str, None] = None,
+        request_cache_dir: str = DEFAULT_REQUEST_CACHE_DIR,
+        use_request_cache: bool = True
     ) -> None:
         self.model_name = model_name
         self.model_config_path = os.path.join(model_configs_dir, model_name + ".json")
@@ -62,7 +65,9 @@ class NoLiMa_Tester:
         self.logged_model_config = redact_secrets(raw_model_config)
         self.model_config = expand_env_vars(raw_model_config, source=self.model_config_path)
 
+        # Identical requests (from this or any earlier run) are answered from the request cache
         self.api_connector = APIConnector(
+            cache=RequestCache(request_cache_dir) if use_request_cache else None,
             **self.model_config
         )
 
@@ -139,7 +144,8 @@ class NoLiMa_Tester:
         return hashlib.sha256(json.dumps(new_config, sort_keys=True).encode()).hexdigest()
         
 
-    def evaluate(self) -> None:
+    def evaluate(self) -> list:
+        """Runs the test and returns the per-request results it saved ([] when it skipped the test)."""
         np.random.seed(self.seed)
         outputs = {
             "eval_name": self.eval_name,
@@ -176,7 +182,7 @@ class NoLiMa_Tester:
         if os.path.exists(results_path):
             print(f"Results already exist at {results_path}")
             print("Skipping evaluation")
-            return
+            return []
         
         if self.prevent_duplicate:
             for result_filename in os.listdir(self.results_dir):
@@ -186,7 +192,7 @@ class NoLiMa_Tester:
                 if outputs["test_hash"] == self.get_hash(other_result):
                     print(f"Duplicate test found with similar hash at {self.results_dir} -- TEST_HASH:", outputs["test_hash"])
                     print("Skipping evaluation")
-                    return
+                    return []
         
         async_tasks = []
         for i in tqdm(np.linspace(self.document_depth_percent_min, self.document_depth_percent_max, self.document_depth_percent_intervals)):
@@ -239,7 +245,12 @@ class NoLiMa_Tester:
 
         loop = asyncio.get_event_loop()
 
-        responses = loop.run_until_complete(asyncio.gather(*async_tasks))
+        # Let every request finish before failing on one: each response is cached as it arrives,
+        # so a re-run only pays for the requests that failed
+        responses = loop.run_until_complete(asyncio.gather(*async_tasks, return_exceptions=True))
+        errors = [response for response in responses if isinstance(response, BaseException)]
+        if errors:
+            raise errors[0]
 
         for i in tqdm(range(len(responses))):
             outputs["results"][i]["metric"] = self._evaluate_response(responses[i]["response"], gold_answers=[outputs["results"][i]["selected_character"]]) if "{CHAR}" in self.needle else self._evaluate_response(responses[i]["response"])
@@ -251,6 +262,8 @@ class NoLiMa_Tester:
             json.dump(outputs, file, indent=4)
         
         print(f"Results saved at {results_path}")
+        print(cost_summary(outputs["results"]))
+        return outputs["results"]
 
     
 
@@ -279,6 +292,8 @@ if __name__ == "__main__":
     parser.add_argument("--test_name", type=str, default="", help="Name of the test")
     parser.add_argument("--seed", type=int, default=42, help="Seed for random character selection")
     parser.add_argument("--distractor", type=str, default="", help="Distractor text placed in the haystack")
+    parser.add_argument("--request_cache_dir", type=str, default=DEFAULT_REQUEST_CACHE_DIR, help="Directory of the LLM request cache, shared by all runs")
+    parser.add_argument("--use_request_cache", type=bool, default=True, help="Answer identical requests from the request cache instead of the API")
 
     args = parser.parse_args()
 
@@ -301,6 +316,8 @@ if __name__ == "__main__":
         metric=args.metric,
         seed=args.seed,
         distractor=args.distractor if args.distractor != "" else None,
+        request_cache_dir=args.request_cache_dir,
+        use_request_cache=args.use_request_cache,
     )
 
     tester.evaluate()

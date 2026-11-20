@@ -138,3 +138,16 @@ def test_marker_identifies_the_cache_dir(tmp_path):
     RequestCache(str(tmp_path / "c"))
     assert (tmp_path / "c" / CACHE_MARKER).is_file()
     assert is_request_cache_dir(str(tmp_path / "c")) and not is_request_cache_dir(str(tmp_path))
+
+
+def test_cost_summary_splits_current_and_total():
+    from request_cache import cost_summary, current_cost
+
+    results = [{"cost": 0.001, "request_cache_hit": False}, {"cost": 0.002, "request_cache_hit": False},
+               {"cost": 0.004, "request_cache_hit": True}, {"cost": 0.0001}]  # last: written before the cache existed
+    assert current_cost(results[2]) == 0.0 and current_cost(results[3]) == 0.0001
+    assert cost_summary(results) == "Cost: current $0.0031, total $0.0071 (requests: 3 sent, 1 from the request cache)"
+    assert cost_summary([{"cost": None, "request_cache_hit": False}]) == \
+        "Cost: current n/a, total n/a (requests: 1 sent, 0 from the request cache)"
+    assert cost_summary([{"cost": 0.004, "request_cache_hit": True}]) == \
+        "Cost: current $0.0000, total $0.0040 (requests: 0 sent, 1 from the request cache)"

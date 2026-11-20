@@ -147,3 +147,22 @@ class RequestCache:
         self._inflight[key] = task
         task.add_done_callback(lambda _: self._inflight.pop(key, None))
         return await task, False
+
+
+# ---------------------------------------------------------------- cost accounting
+
+def current_cost(result: dict) -> Optional[float]:
+    """Cost of a per-request result in the run that produced it: 0 when served from the cache, else what the API reported."""
+    return 0.0 if result.get("request_cache_hit") else result.get("cost")
+
+
+def cost_summary(results: list) -> str:
+    """One line: the cost of the requests sent now (current) and of all requests including cached ones (total)."""
+    def total_of(values: list) -> str:
+        present = [v for v in values if v is not None]
+        return f"${sum(present):.4f}" if present else "n/a"
+
+    n_cached = sum(bool(result.get("request_cache_hit")) for result in results)
+    return (f"Cost: current {total_of([current_cost(r) for r in results])}, "
+            f"total {total_of([r.get('cost') for r in results])} "
+            f"(requests: {len(results) - n_cached} sent, {n_cached} from the request cache)")

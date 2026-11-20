@@ -128,6 +128,16 @@ The needle set and haystack data will be downloaded to the `data` directory from
    ```
 3. **Collect the results**
     - All outputs are automatically saved to the results directory specified in each run_config file.
+    - Each run prints its cost per test and in total: **current** is what the requests sent to the API cost, **total** also counts the requests answered from the request cache (at the price recorded when they were first sent).
+
+#### Request cache
+- Every LLM request is cached on disk, independently of the results, in `evaluation/results/request_cache/` (set `request_cache_dir` in a run config to move it). An identical request, from this run or any earlier one, is answered from the cache and not sent or paid for again.
+- A request is identified by the SHA-256 of its *request record*: provider, endpoint, model and the exact call arguments (messages, `max_tokens`, `temperature`, `top_p`, seed, ...). API keys, timeouts, retry and tokenizer settings are not part of it.
+- Each entry is one JSON file, `<model>/<hash[:2]>/<hash>.json`, holding the request record and the response, including its reported cost. Texts longer than 2,000 characters (the haystack prompt) are stored as a SHA-256 digest with the first and last 200 characters.
+- Each per-request result records `request_hash` (the entry's file name) and `request_cache_hit`.
+- To send requests again, delete their entries (or a whole model folder). To bypass the cache for a run, set `use_request_cache: false`.
+- Responses with `finish_reason: "error"` are not cached, and when a request fails, the responses that did arrive are already cached, so a re-run only sends the failed requests.
+- Separately, `prevent_duplicate_tests` (on by default) still skips a test when its results directory already has a result file for the same test settings.
 4. **Gathering the results**
     - Run `make gather-results` (or `python evaluation/gather_results.py [RESULTS_DIR ...]`) to gather the results from the output files into `evaluation/results/gathered_results.csv`, containing the accuracy of each test.
     - The same command writes `evaluation/results/report.md`: per run, the score at each context length, the base score, threshold and effective length (as defined above), per-test scores, cut-off answers, cost and the model config. Each result file also records the model config it was run with (`${VAR}` references are kept unexpanded and literal secrets are redacted).
