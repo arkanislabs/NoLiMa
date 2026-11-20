@@ -140,7 +140,7 @@ The needle set and haystack data will be downloaded to the `data` directory from
 - Separately, `prevent_duplicate_tests` (on by default) still skips a test when its results directory already has a result file for the same test settings.
 4. **Gathering the results**
     - Run `make gather-results` (or `python evaluation/gather_results.py [RESULTS_DIR ...]`) to gather the results from the output files into `evaluation/results/gathered_results.csv`, containing the accuracy of each test.
-    - The same command writes `evaluation/results/report.md`: per run, the score at each context length, the base score, threshold and effective length (as defined above), per-test scores, cut-off answers, cost and the model config. Each result file also records the model config it was run with (`${VAR}` references are kept unexpanded and literal secrets are redacted).
+    - The same command writes `evaluation/results/report.md`: per run, the score at each context length, the base score, threshold and effective length (as defined above), per-test scores, cut-off answers, cost and the model config. Cost is shown as **current** (requests sent to the API when the results were produced) and **total** (also counting requests answered from the request cache); the CSV has the matching `current_cost`, `total_cost` and `n_request_cache_hits` columns. The request cache directory is skipped. Each result file also records the model config it was run with (`${VAR}` references are kept unexpanded and literal secrets are redacted).
 
 ### Additional Notes
 You can find various needle sets (e.g., CoT-style, multiple choice, direct, distractor-included) in `data/needlesets`.

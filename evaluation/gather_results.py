@@ -6,11 +6,18 @@ model_config.<field> columns) and
   n_requests, n_correct   requests in the file and how many scored 1
   n_cutoff                requests that hit max_tokens (finish_reason "length")
   total_input_tokens, total_output_tokens, total_reasoning_tokens
-  total_cost              USD, when the provider reports it (e.g. OpenRouter)
+  n_request_cache_hits    requests answered from the local request cache instead of the API
+  current_cost            USD of the requests sent to the API when the file was produced
+  total_cost              USD of all requests, including those answered from the request cache
+                          (costs are known only when the provider reports them, e.g. OpenRouter)
 
 Report: per run (a parent_results_dir such as results/<run>/CL1K/), the score at
 each context length, base score, threshold and effective length as defined in
-the NoLiMa paper, plus per-test scores, cut-offs, cost and the model config.
+the NoLiMa paper, plus per-test scores, cut-offs, current and total cost and the
+model config.
+
+The request cache (evaluation/results/request_cache/) is skipped: its entries are
+not result files.
 
 Usage (from anywhere):
   python evaluation/gather_results.py                     # all of evaluation/results/
@@ -26,6 +33,8 @@ from collections import defaultdict
 from datetime import datetime
 
 import numpy as np
+
+from request_cache import current_cost, is_request_cache_dir
 
 EVALUATION_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_RESULTS_DIR = os.path.join(EVALUATION_DIR, "results")
@@ -44,7 +53,11 @@ FULL_RUN_REQUESTS = 5 * 58 * 26   # requests per context length in a full run (h
 def load_result_files(results_dir: str) -> list:
     """Returns (path, data) for every result file under results_dir."""
     loaded = []
-    for dirpath, _, filenames in os.walk(results_dir):
+    if is_request_cache_dir(results_dir):
+        return loaded
+    for dirpath, dirnames, filenames in os.walk(results_dir):
+        # The request cache can live inside results_dir; its entries are not result files
+        dirnames[:] = [d for d in dirnames if not is_request_cache_dir(os.path.join(dirpath, d))]
         for filename in sorted(filenames):
             # Only result files; skips the gathered CSV and report saved in the same tree
             if not filename.endswith(".json"):
@@ -82,6 +95,8 @@ def get_summarized_result(data: dict) -> dict:
     data["total_input_tokens"] = sum([res["prompt_tokens"] for res in results])
     data["total_output_tokens"] = sum([res["completion_tokens"] for res in results])
     data["total_reasoning_tokens"] = sum_or_none([res.get("reasoning_tokens") for res in results])
+    data["n_request_cache_hits"] = sum(bool(res.get("request_cache_hit")) for res in results)
+    data["current_cost"] = sum_or_none([current_cost(res) for res in results])
     data["total_cost"] = sum_or_none([res.get("cost") for res in results])
     for key, value in (data.pop("model_config", None) or {}).items():
         data[f"model_config.{key}"] = value
@@ -119,7 +134,8 @@ def summarize_runs(loaded: list) -> dict:
 
     summaries = {}
     for run, files in sorted(by_run.items()):
-        length_stats = defaultdict(lambda: {"n": 0, "correct": 0, "cutoff": 0, "cost": [], "reasoning": [], "haystacks": set(), "tests": set()})
+        length_stats = defaultdict(lambda: {"n": 0, "correct": 0, "cutoff": 0, "cache_hits": 0, "cost": [], "current_cost": [],
+                                            "reasoning": [], "haystacks": set(), "tests": set()})
         test_scores = defaultdict(lambda: defaultdict(list))   # test -> length -> metrics
         configs = {}
         files_without_config = 0
@@ -132,7 +148,9 @@ def summarize_runs(loaded: list) -> dict:
                 stats["n"] += 1
                 stats["correct"] += res["metric"]
                 stats["cutoff"] += res.get("finish_reason") == "length"
+                stats["cache_hits"] += bool(res.get("request_cache_hit"))
                 stats["cost"].append(res.get("cost"))
+                stats["current_cost"].append(current_cost(res))
                 stats["reasoning"].append(res.get("reasoning_tokens"))
                 test_scores[data["test_name"]][length].append(res["metric"])
             if "model_config" in data:
@@ -172,12 +190,14 @@ def summarize_runs(loaded: list) -> dict:
 
 def summarize_models(loaded: list) -> dict:
     """Request counts and cost per model_name, across all runs. Returns {model_name: summary}."""
-    models = defaultdict(lambda: {"runs": set(), "n": 0, "costs": []})
+    models = defaultdict(lambda: {"runs": set(), "n": 0, "cache_hits": 0, "costs": [], "current_costs": []})
     for _, data in loaded:
         model = models[data["model_name"]]
         model["runs"].add(run_name(data))
         model["n"] += len(data["results"])
+        model["cache_hits"] += sum(bool(res.get("request_cache_hit")) for res in data["results"])
         model["costs"] += [res.get("cost") for res in data["results"]]
+        model["current_costs"] += [current_cost(res) for res in data["results"]]
     return dict(sorted(models.items()))
 
 
@@ -220,14 +240,17 @@ def config_differences(configs: list) -> list:
 def build_report(summaries: dict, models: dict, results_dirs: list) -> str:
     all_lengths = sorted({length for summary in summaries.values() for length in summary["lengths"]})
     total_requests = sum(stats["n"] for s in summaries.values() for stats in s["length_stats"].values())
+    total_hits = sum(stats["cache_hits"] for s in summaries.values() for stats in s["length_stats"].values())
     total_cost = sum_or_none([sum_or_none(stats["cost"]) for s in summaries.values() for stats in s["length_stats"].values()])
+    total_current = sum_or_none([sum_or_none(stats["current_cost"]) for s in summaries.values() for stats in s["length_stats"].values()])
 
     lines = [
         "# NoLiMa results report",
         "",
         f"Generated {datetime.now():%Y-%m-%d %H:%M} from {', '.join(f'`{d}`' for d in results_dirs)}: "
         f"{len(summaries)} run(s), {sum(s['n_files'] for s in summaries.values())} result files, "
-        f"{total_requests:,} requests, total cost {format_cost(total_cost)}.",
+        f"{total_requests:,} requests ({total_hits:,} from the request cache), "
+        f"current cost {format_cost(total_current)}, total cost {format_cost(total_cost)}.",
         "",
         "## Summary",
         "",
@@ -253,15 +276,27 @@ def build_report(summaries: dict, models: dict, results_dirs: list) -> str:
     for model_name, m in models.items():
         missing = sum(cost is None for cost in m["costs"])
         note = "" if not missing else ("not reported" if missing == m["n"] else f"{missing:,} requests without a reported cost")
-        rows.append([model_name, ", ".join(f"`{run}`" for run in sorted(m["runs"])), f"{m['n']:,}", format_cost(sum_or_none(m["costs"])), note])
-    lines += md_table(["Model", "Runs", "Requests", "Cost (USD)", "Note"], rows)
-    lines += ["", "Cost is the sum of what the provider reported per request (e.g. OpenRouter's `usage.cost`).", ""]
+        rows.append([model_name, ", ".join(f"`{run}`" for run in sorted(m["runs"])), f"{m['n']:,}", f"{m['cache_hits']:,}",
+                     format_cost(sum_or_none(m["current_costs"])), format_cost(sum_or_none(m["costs"])), note])
+    lines += md_table(["Model", "Runs", "Requests", "From cache", "Current cost (USD)", "Total cost (USD)", "Note"], rows)
+    lines += [
+        "",
+        "**Current cost**: requests sent to the API when the results were produced. "
+        "**Total cost**: all requests, including those answered from the local request cache, at the price recorded when they were first sent. "
+        "Costs are what the provider reported per request (e.g. OpenRouter's `usage.cost`).",
+        "",
+    ]
 
     for run, s in summaries.items():
         lines += [f"## Run `{run}`", ""]
         lines += [f"- **Model:** {', '.join(s['model_names'])}"]
         lines += [f"- **Result files:** {s['n_files']}"]
-        lines += [f"- **Cost:** {format_cost(sum_or_none([sum_or_none(stats['cost']) for stats in s['length_stats'].values()]))}"]
+        n_requests = sum(stats["n"] for stats in s["length_stats"].values())
+        n_hits = sum(stats["cache_hits"] for stats in s["length_stats"].values())
+        run_current = sum_or_none([sum_or_none(stats["current_cost"]) for stats in s["length_stats"].values()])
+        run_total = sum_or_none([sum_or_none(stats["cost"]) for stats in s["length_stats"].values()])
+        lines += [f"- **Requests:** {n_requests:,} ({n_hits:,} from the request cache)"]
+        lines += [f"- **Cost:** current {format_cost(run_current)}, total {format_cost(run_total)}"]
         if len(s["configs"]) == 1:
             config = s["configs"][0]
             settings = ", ".join(f"`{k}` = `{json.dumps(config[k])}`" for k in ("model", "max_tokens", "temperature", "top_p") if k in config)
@@ -290,7 +325,7 @@ def build_report(summaries: dict, models: dict, results_dirs: list) -> str:
             lines += ["**Warnings**", ""] + [f"- {w}" for w in warnings] + [""]
 
         lines += ["### Per context length", ""]
-        header = ["Context length", "Score", "Correct / requests", "Tests", "Haystacks", "Cut off", "Avg reasoning tokens", "Cost"]
+        header = ["Context length", "Score", "Correct / requests", "Tests", "Haystacks", "Cut off", "Avg reasoning tokens", "Current cost", "Total cost"]
         rows = []
         for length in s["lengths"]:
             stats = s["length_stats"][length]
@@ -298,7 +333,8 @@ def build_report(summaries: dict, models: dict, results_dirs: list) -> str:
             rows.append([
                 format_length(length), styled_score(s["scores"][length], s), f"{stats['correct']} / {stats['n']}",
                 len(stats["tests"]), len(stats["haystacks"]), stats["cutoff"],
-                f"{np.mean(reasoning):.0f}" if reasoning else "n/a", format_cost(sum_or_none(stats["cost"])),
+                f"{np.mean(reasoning):.0f}" if reasoning else "n/a",
+                format_cost(sum_or_none(stats["current_cost"])), format_cost(sum_or_none(stats["cost"])),
             ])
         lines += md_table(header, rows) + [""]
 
