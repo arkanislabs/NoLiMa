@@ -151,3 +151,12 @@ def test_cost_summary_splits_current_and_total():
         "Cost: current n/a, total n/a (requests: 1 sent, 0 from the request cache)"
     assert cost_summary([{"cost": 0.004, "request_cache_hit": True}]) == \
         "Cost: current $0.0000, total $0.0040 (requests: 0 sent, 1 from the request cache)"
+
+
+def test_unknown_cost_is_not_reported_as_zero():
+    # providers that report no cost (Gemini, AWS, OpenAI direct, Azure, local vLLM)
+    from request_cache import cost_summary, current_cost
+
+    assert current_cost({"cost": None, "request_cache_hit": True}) is None
+    results = [{"cost": None, "request_cache_hit": False}, {"cost": None, "request_cache_hit": True}]
+    assert cost_summary(results) == "Cost: current n/a, total n/a (requests: 1 sent, 1 from the request cache)"

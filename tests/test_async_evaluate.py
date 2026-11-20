@@ -75,6 +75,7 @@ def sent(monkeypatch, send_state):
         send_state["sent"].append(request)
         if send_state["fail_first"] and len(send_state["sent"]) == 1:
             raise RuntimeError("provider failed")
+        await asyncio.sleep(0.01)  # like network latency: the failure arrives while other requests are in flight
         return {"response": "Yuki", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
                 "finish_reason": "stop", "cost": 0.001}
 

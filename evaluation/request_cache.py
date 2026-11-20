@@ -152,8 +152,14 @@ class RequestCache:
 # ---------------------------------------------------------------- cost accounting
 
 def current_cost(result: dict) -> Optional[float]:
-    """Cost of a per-request result in the run that produced it: 0 when served from the cache, else what the API reported."""
-    return 0.0 if result.get("request_cache_hit") else result.get("cost")
+    """
+    Cost of a per-request result in the run that produced it: 0 when served from the cache, else what
+    the API reported. None when the provider reports no cost, so an unknown spend never shows as $0.
+    """
+    cost = result.get("cost")
+    if result.get("request_cache_hit") and cost is not None:
+        return 0.0
+    return cost
 
 
 def cost_summary(results: list) -> str:
