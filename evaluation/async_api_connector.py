@@ -94,6 +94,9 @@ def build_request(
             request["max_tokens"] = int(max_tokens)
             request["temperature"] = float(temperature)
             request["top_p"] = float(top_p)
+        # OpenRouter provider routing (e.g. pin to OpenAI). It decides which backend answers, so it is part of the key.
+        if "openrouter_provider" in model_config:
+            request["extra_body"] = {"provider": model_config["openrouter_provider"]}
     elif api_provider == "gemini":
         request["system_instruction"] = default_system_prompt
         request["contents"] = messages[-1]["content"]
@@ -325,6 +328,9 @@ class APIConnector:
                 "reasoning_tokens": completion.usage.completion_tokens_details.reasoning_tokens if completion.usage.completion_tokens_details else None,
                 # USD cost; only some providers (e.g. OpenRouter) report it
                 "cost": getattr(completion.usage, "cost", None),
+                # Backend that served the request (OpenRouter only), to check provider pinning held
+                "provider": getattr(completion, "provider", None),
+                "system_fingerprint": getattr(completion, "system_fingerprint", None),
             }
             return output
 

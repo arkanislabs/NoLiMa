@@ -23,6 +23,16 @@ def test_build_request_openai_compatible():
     assert thinking["max_completion_tokens"] == 2048 and not {"max_tokens", "temperature", "top_p"} & set(thinking)
 
 
+def test_build_request_sends_openrouter_provider_routing_and_keys_the_cache_on_it():
+    routing = {"only": ["openai"], "allow_fallbacks": False, "require_parameters": True}
+    pinned = build_request("vllm", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini", {"openrouter_provider": routing},
+                           SYS, MSGS, 192, 0.0, 1.0)
+    unpinned = build_request("vllm", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini", {}, SYS, MSGS, 192, 0.0, 1.0)
+    assert pinned["extra_body"] == {"provider": {"only": ["openai"], "allow_fallbacks": False, "require_parameters": True}}
+    assert "extra_body" not in unpinned
+    assert request_key(pinned) != request_key(unpinned)
+
+
 def test_build_request_gemini():
     r = build_request("gemini", "EMPTY", "gemini-2.5-flash", {"thinking_budget": 1536}, SYS, MSGS, 1536, 0.0, 1.0)
     assert r == {"api_provider": "gemini", "api_url": "EMPTY", "model": "gemini-2.5-flash", "system_instruction": SYS,
@@ -51,14 +61,36 @@ def test_send_passes_the_request_to_the_openai_client(make_connector):
         usage = SimpleNamespace(prompt_tokens=10, completion_tokens=2, total_tokens=12, prompt_tokens_details=None,
                                 completion_tokens_details=None, cost=0.001)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Veronica"), finish_reason="stop")],
-                               usage=usage)
+                               usage=usage, system_fingerprint=None)
 
     connector.api = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     request = build_request("vllm", "http://localhost:1/v1", "test/model", {}, SYS, MSGS, 10, 0.0, 1.0)
     out = asyncio.run(connector._send(request))
     assert captured == {k: v for k, v in request.items() if k not in ("api_provider", "api_url")}
     assert out == {"response": "Veronica", "prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12,
-                   "finish_reason": "stop", "cached_tokens": None, "reasoning_tokens": None, "cost": 0.001}
+                   "finish_reason": "stop", "cached_tokens": None, "reasoning_tokens": None, "cost": 0.001,
+                   "provider": None, "system_fingerprint": None}
+
+
+def test_send_forwards_provider_routing_and_records_who_served_it(make_connector):
+    connector = make_connector()
+    captured = {}
+
+    async def create(**params):
+        captured.update(params)
+        usage = SimpleNamespace(prompt_tokens=10, completion_tokens=2, total_tokens=12, prompt_tokens_details=None,
+                                completion_tokens_details=None, cost=0.001)
+        # OpenRouter adds the serving provider to the completion, next to OpenAI's system_fingerprint
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Veronica"), finish_reason="stop")],
+                               usage=usage, system_fingerprint="fp_2bf6f3634d", provider="OpenAI")
+
+    connector.api = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    routing = {"only": ["openai"], "allow_fallbacks": False}
+    request = build_request("vllm", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini", {"openrouter_provider": routing},
+                            SYS, MSGS, 10, 0.0, 1.0)
+    out = asyncio.run(connector._send(request))
+    assert captured["extra_body"] == {"provider": {"only": ["openai"], "allow_fallbacks": False}}
+    assert (out["provider"], out["system_fingerprint"]) == ("OpenAI", "fp_2bf6f3634d")
 
 
 def test_generate_response_uses_the_cache(tmp_path, make_connector):
