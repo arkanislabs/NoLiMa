@@ -1,0 +1,14 @@
+# Full NoLiMa run with the paper's settings: 5 haystacks x 58 tests x 26 depths = 7,540 requests.
+# Run from evaluation/:
+#   PYTHONPATH=../ TOKENIZERS_PARALLELISM=false uv run python -u run_tests.py --config run_config/nolima_gpt_4o_mini_openrouter_16K.yaml
+model_name: "gpt_4o_mini_openrouter"
+model_configs_dir: "./model_configs/"
+needle_set_path: "../data/needlesets/needle_set.json"
+haystack_dir: "../data/haystack/rand_shuffle"
+parent_results_dir: "./results/gpt_4o_mini_openrouter/CL16K/"
+context_length: 16000
+document_depth_percent_min: 0
+document_depth_percent_max: 100
+document_depth_percent_intervals: 26
+metric: contains
+use_default_system_prompt: true

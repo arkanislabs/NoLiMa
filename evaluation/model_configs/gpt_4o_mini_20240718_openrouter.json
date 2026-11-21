@@ -1,0 +1,18 @@
+{
+    "model": "openai/gpt-4o-mini-2024-07-18",
+    "api_key": "${OPENROUTER_API_KEY}",
+    "api_url": "https://openrouter.ai/api/v1",
+    "api_provider": "vllm",
+    "openrouter_provider": {
+        "only": ["openai"],
+        "allow_fallbacks": false,
+        "require_parameters": true
+    },
+    "max_tokens": 192,
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "timeout": 200,
+    "max_retries": 3,
+    "tokenizer_type": "tiktoken",
+    "tokenizer_model": "o200k_base"
+}
