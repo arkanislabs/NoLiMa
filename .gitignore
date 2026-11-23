@@ -2,8 +2,9 @@
 /data/needlesets/
 /data/haystack/
 
-# Evaluation results
-/evaluation/results/
+# Evaluation results (except the hand-written experiment log)
+/evaluation/results/*
+!/evaluation/results/experiment_log.md
 
 # IDE
 .idea/
