@@ -5,8 +5,18 @@ export PYTHONPATH="../"
 export TOKENIZERS_PARALLELISM=false
 echo $$
 
-python -u run_tests.py --config run_config/nolima_gpt_4o_mini_openrouter_250.yaml
-python -u run_tests.py --config run_config/nolima_gpt_4o_mini_openrouter_500.yaml
-python -u run_tests.py --config run_config/nolima_gpt_4o_mini_openrouter_1K.yaml
-python -u run_tests.py --config run_config/nolima_gpt_4o_mini_openrouter_2K.yaml
-python -u run_tests.py --config run_config/nolima_gpt_4o_mini_openrouter_4K.yaml
+set -- \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_250.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_500.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_1K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_2K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_4K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_8K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_16K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_32K.yaml
+
+stage=0
+for config in "$@"; do
+    stage=$((stage + 1))
+    python -u run_tests.py --config "$config" --progress_label "[$stage/$#]"
+done

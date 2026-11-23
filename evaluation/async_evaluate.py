@@ -7,7 +7,7 @@
 
 import os
 import json
-from typing import Union
+from typing import Optional, Union
 from tqdm import tqdm
 import asyncio
 
@@ -160,11 +160,13 @@ class NoLiMa_Tester:
         else:
             raise ValueError(f"Invalid metric: {self.metric}")
 
-    def evaluate(self) -> list:
+    def evaluate(self, progress: Optional[tqdm] = None) -> list:
         """
         Runs the test, (over)writes its result file and returns the per-request results. Requests
         already in the request cache are not sent again, so re-running a test only pays for what is missing.
+        `progress`, when given, is advanced by one as each request finishes and receives this test's messages.
         """
+        write = progress.write if progress is not None else print
         np.random.seed(self.seed)
         outputs = {
             "eval_name": self.eval_name,
@@ -199,7 +201,7 @@ class NoLiMa_Tester:
         results_path = os.path.join(self.results_dir, f"{self.eval_name}.json")
 
         async_tasks = []
-        for i in tqdm(np.linspace(self.document_depth_percent_min, self.document_depth_percent_max, self.document_depth_percent_intervals)):
+        for i in (np.linspace(self.document_depth_percent_min, self.document_depth_percent_max, self.document_depth_percent_intervals)):
             needle_depth = i / 100
             api_output = {}
             if "{CHAR}" in self.needle:
@@ -247,16 +249,23 @@ class NoLiMa_Tester:
                 with open(placement_log_path, "w") as file:
                     file.write(placement_output["text"])
 
+        async def tick(task):
+            try:
+                return await task
+            finally:
+                if progress is not None:
+                    progress.update(1)
+
         loop = asyncio.get_event_loop()
 
         # Let every request finish before failing on one: each response is cached as it arrives,
         # so a re-run only pays for the requests that failed
-        responses = loop.run_until_complete(asyncio.gather(*async_tasks, return_exceptions=True))
+        responses = loop.run_until_complete(asyncio.gather(*map(tick, async_tasks), return_exceptions=True))
         errors = [response for response in responses if isinstance(response, BaseException)]
         if errors:
             raise errors[0]
 
-        for i in tqdm(range(len(responses))):
+        for i in range(len(responses)):
             outputs["results"][i]["metric"] = self._evaluate_response(responses[i]["response"], gold_answers=[outputs["results"][i]["selected_character"]]) if "{CHAR}" in self.needle else self._evaluate_response(responses[i]["response"])
             for k, v in responses[i].items():
                 outputs["results"][i][k] = v
@@ -265,14 +274,15 @@ class NoLiMa_Tester:
         if os.path.exists(results_path):
             changed = changed_settings(results_path, outputs)
             if changed:
-                print(f"Warning: overwriting {results_path}, which was produced with different settings: {', '.join(changed)}. "
+                write(f"Warning: overwriting {results_path}, which was produced with different settings: {', '.join(changed)}. "
                       "Use a separate parent_results_dir to keep both.")
-            else:
+            elif progress is None:
                 print(f"Overwriting {results_path}")
         write_json_atomic(results_path, outputs, indent=4)
         
-        print(f"Results saved at {results_path}")
-        print(cost_summary(outputs["results"]))
+        if progress is None:
+            print(f"Results saved at {results_path}")
+            print(cost_summary(outputs["results"]))
         return outputs["results"]
 
     
