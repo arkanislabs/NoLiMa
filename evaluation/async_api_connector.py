@@ -94,9 +94,15 @@ def build_request(
             request["max_tokens"] = int(max_tokens)
             request["temperature"] = float(temperature)
             request["top_p"] = float(top_p)
-        # OpenRouter provider routing (e.g. pin to OpenAI). It decides which backend answers, so it is part of the key.
+        # OpenRouter provider routing (e.g. pin to OpenAI) and reasoning settings (e.g. thinking off). Both change
+        # which backend answers or how, so they are part of the key.
+        extra_body = {}
         if "openrouter_provider" in model_config:
-            request["extra_body"] = {"provider": model_config["openrouter_provider"]}
+            extra_body["provider"] = model_config["openrouter_provider"]
+        if "openrouter_reasoning" in model_config:
+            extra_body["reasoning"] = model_config["openrouter_reasoning"]
+        if extra_body:
+            request["extra_body"] = extra_body
     elif api_provider == "gemini":
         request["system_instruction"] = default_system_prompt
         request["contents"] = messages[-1]["content"]

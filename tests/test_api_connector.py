@@ -33,6 +33,19 @@ def test_build_request_sends_openrouter_provider_routing_and_keys_the_cache_on_i
     assert request_key(pinned) != request_key(unpinned)
 
 
+def test_build_request_sends_openrouter_reasoning_and_keys_the_cache_on_it():
+    routing = {"only": ["cloudflare"], "allow_fallbacks": False, "require_parameters": True}
+    off = build_request("vllm", "https://openrouter.ai/api/v1", "deepseek/m",
+                        {"openrouter_provider": routing, "openrouter_reasoning": {"enabled": False}}, SYS, MSGS, 192, 0.0, 1.0)
+    default = build_request("vllm", "https://openrouter.ai/api/v1", "deepseek/m", {"openrouter_provider": routing},
+                            SYS, MSGS, 192, 0.0, 1.0)
+    assert off["extra_body"] == {"provider": routing, "reasoning": {"enabled": False}}
+    assert default["extra_body"] == {"provider": routing}
+    assert request_key(off) != request_key(default)
+    only_reasoning = build_request("vllm", "u", "m", {"openrouter_reasoning": {"effort": "high"}}, SYS, MSGS, 10, 0.0, 1.0)
+    assert only_reasoning["extra_body"] == {"reasoning": {"effort": "high"}}
+
+
 def test_build_request_gemini():
     r = build_request("gemini", "EMPTY", "gemini-2.5-flash", {"thinking_budget": 1536}, SYS, MSGS, 1536, 0.0, 1.0)
     assert r == {"api_provider": "gemini", "api_url": "EMPTY", "model": "gemini-2.5-flash", "system_instruction": SYS,
