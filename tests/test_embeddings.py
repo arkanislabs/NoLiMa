@@ -106,6 +106,21 @@ def test_send_pins_the_provider_requests_floats_and_orders_rows(make_embedder):
     assert usage == {"tokens": 7, "cost": 0.00014}
 
 
+def test_response_with_missing_rows_raises_and_caches_nothing(make_embedder):
+    async def create(**kwargs):
+        data = [SimpleNamespace(index=0, embedding=[1.0]), SimpleNamespace(index=2, embedding=[3.0])]
+        return SimpleNamespace(data=data, usage=SimpleNamespace(prompt_tokens=3, total_tokens=3, cost=None))
+
+    embedder = make_embedder()
+    embedder.client = SimpleNamespace(embeddings=SimpleNamespace(create=create))
+    with pytest.raises(RuntimeError, match="expected indices"):
+        asyncio.run(embedder._send(["a", "b", "c"]))
+    with pytest.raises(RuntimeError, match="expected indices"):
+        asyncio.run(embedder.embed(["a", "b", "c"]))
+    key = embedding_key(MODEL, URL, PIN, "a")
+    assert embedder.cache.get_many([embedding_key(MODEL, URL, PIN, t) for t in "abc"]) == {}
+
+
 def test_load_embedder_reads_the_config(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_EMBEDDING_KEY", "sk-from-env")
     config = {"model": MODEL, "api_key": "${TEST_EMBEDDING_KEY}", "api_url": URL, "openrouter_provider": PIN,

@@ -82,6 +82,10 @@ class Embedder:
             kwargs["extra_body"] = {"provider": self.openrouter_provider}
         response = await self.client.embeddings.create(**kwargs)
         rows = sorted(response.data, key=lambda item: item.index)
+        indices = [row.index for row in rows]
+        if indices != list(range(len(texts))):
+            raise RuntimeError(f"Embedding response does not match the request: expected indices "
+                               f"{list(range(len(texts)))}, received {indices}")
         vectors = np.array([row.embedding for row in rows], dtype=np.float32)
         usage = response.usage
         return vectors, {"tokens": usage.prompt_tokens, "cost": getattr(usage, "cost", None)}
