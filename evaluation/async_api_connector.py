@@ -14,7 +14,7 @@ import httpx
 
 from functools import cache
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 from typing import Union, List, Optional
 
 # The Gemini (vertexai, google.genai) and AWS (langchain_aws) SDKs are imported where those providers are
@@ -35,6 +35,21 @@ DEFAULT_TOKENIZER_MAPPING = {
 OPENAI_COMPATIBLE_PROVIDERS = ("openai", "vllm", "azure-openai")
 # Request record fields that select the endpoint rather than being arguments of the SDK call
 ENDPOINT_FIELDS = ("api_provider", "api_url")
+
+
+def uses_plain_rust_decode(tokenizer) -> bool:
+    """
+    Whether the tokenizer's decode is just its Rust tokenizer's decode, so calling the Rust one directly gives the
+    same text: a fast tokenizer that doesn't clean up spaces and whose class (e.g. CodeGen, Whisper, or remote
+    code) doesn't override decoding.
+    """
+    cls = type(tokenizer)
+    return (
+        tokenizer.is_fast
+        and not tokenizer.clean_up_tokenization_spaces
+        and cls.decode is PreTrainedTokenizerFast.decode
+        and cls._decode is PreTrainedTokenizerFast._decode
+    )
 
 
 def build_messages(
@@ -153,7 +168,7 @@ class APIConnector:
             
         if self.tokenizer_type == "huggingface":
             self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_model, use_fast=True)
-            self._hf_fast_decode = self.tokenizer.is_fast and not self.tokenizer.clean_up_tokenization_spaces
+            self._hf_fast_decode = uses_plain_rust_decode(self.tokenizer)
         elif self.tokenizer_type == "tiktoken":
             self.tokenizer = tiktoken.get_encoding(self.tokenizer_model)
         elif self.tokenizer_type == "google":

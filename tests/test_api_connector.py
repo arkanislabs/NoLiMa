@@ -139,3 +139,23 @@ def test_generate_response_without_cache_always_sends(make_connector):
     outs = [asyncio.run(connector.generate_response("", "Q?", max_tokens=10)) for _ in range(2)]
     assert len(calls) == 2 and [o["request_cache_hit"] for o in outs] == [False, False]
     assert outs[0]["request_hash"] == request_key(calls[0])
+
+
+def _fast_tokenizer(cls=None, **kwargs):
+    from tokenizers import Tokenizer, models
+    from transformers import PreTrainedTokenizerFast
+    backend = Tokenizer(models.WordLevel({"a": 0, "b": 1, "[UNK]": 2}, unk_token="[UNK]"))
+    return (cls or PreTrainedTokenizerFast)(tokenizer_object=backend, **kwargs)
+
+
+def test_rust_decode_only_when_it_gives_the_same_text():
+    from transformers import PreTrainedTokenizerFast
+    from async_api_connector import uses_plain_rust_decode
+
+    class CustomDecode(PreTrainedTokenizerFast):  # like CodeGen, Whisper or remote-code tokenizers
+        def _decode(self, token_ids, **kwargs):
+            return super()._decode(token_ids, **kwargs).upper()
+
+    assert uses_plain_rust_decode(_fast_tokenizer(clean_up_tokenization_spaces=False))
+    assert not uses_plain_rust_decode(_fast_tokenizer(clean_up_tokenization_spaces=True))
+    assert not uses_plain_rust_decode(_fast_tokenizer(CustomDecode, clean_up_tokenization_spaces=False))
