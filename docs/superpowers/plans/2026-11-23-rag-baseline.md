@@ -37,12 +37,12 @@ On 2026-11-24, after a probe showed TF-IDF and BM25 both at chance recall on NoL
 - **Cost tracking:** each request logs `rag.embedding = {texts_sent, cache_hits, tokens, cost}` for its own embedding call. `cost` is what OpenRouter reports, or `None` if it doesn't. The report's retrieval table and the end of a run show embedding tokens and cost, kept apart from the generator's current/total cost.
 - **Prompt:** unchanged `DEFAULT_TASK_TEMPLATE`, with `{haystack}` = the retrieved context.
 - **Expect weak retrieval; that is the finding.** A probe (rand_book_1, 16K window, 20 chunks of 1000/200, the 10 one-hop needle templates × 3 depths, so 30 cases; random recall@3 = 0.15) gave recall@3 of 0.13 for TF-IDF and 0.23 to 0.27 for two small local embedders. A second probe (2026-11-24: all 58 needle/question pairs × the 5 books × 5 depths, chunks of 750 words ≈ 1000 tokens with 150 overlap, recall@3 with random tie-breaking) put BM25 and per-request TF-IDF both at chance: 0.600 / 0.315 / 0.074 at about 4K / 8K / 32K, against 0.60 / 0.30 / 0.07 for random retrieval. The needle chunk scored above 0 in only 4% to 6% of requests. With the distractor needle set (`needle_set_w_Distractor.json`, not used by these configs), BM25 ranks the distractor's chunk first in 75% to 97% of requests. NoLiMa removes literal overlap, and one needle sentence is about 2% of a 1K-token chunk. text-embedding-3-small is stronger but still sees the needle diluted. The per-request retrieval log separates retrieval misses from reading errors.
-- **Results:** RAG runs get their own `parent_results_dir` (`<model>_rag_c<size>_k<top_k>`), so `gather_results` reports them as a separate run next to the full-context run. The result file name is unchanged. The `rag` settings, including the redacted embedding config, are a top-level key of the result file (only when RAG is on), so the existing overwrite warning catches RAG and full-context results written to the same folder.
+- **Results:** RAG runs get their own `parent_results_dir` (`<model>_rag_c<size>_k<top_k>`), so `gather_results` reports them as a separate run next to the full-context run. The result file name is unchanged. The `rag` settings, the retrieval method and the redacted embedding config are a top-level key of the result file (only when RAG is on), so the existing overwrite warning catches RAG and full-context results written to the same folder. **The method is code, not config,** so the result file records it: `rag.retriever` is `RETRIEVER` from `rag.py`, `{"lexical": "bm25", "bm25_k1": 1.2, "bm25_b": 0.75, "rrf_k": 60}`. Nothing becomes tunable, but every result says how it was retrieved, and a changed method (another lexical scorer, other constants, a dense-only ablation) also triggers the overwrite warning and the report's mixed-settings warning.
 
 ## Global Constraints
 
 - RAG is off unless the run config has a `rag:` block. Without it, requests, result files (top-level keys = `RESULT_KEYS` in `tests/test_async_evaluate.py`) and reports stay exactly as they are now.
-- Defaults: `chunk_size = 1000`, `chunk_overlap = 200`, `top_k = 3`, `embedding_model = "text_embedding_3_small_openrouter"` (a config name in `model_configs_dir`). Constants, not configurable: `RRF_K = 60`, `BM25_K1 = 1.2`, `BM25_B = 0.75` and `CHUNK_SEPARATOR = "\n\n[...]\n\n"` in `rag.py`, `EMBEDDING_BATCH_SIZE = 64` in `embeddings.py`.
+- Defaults: `chunk_size = 1000`, `chunk_overlap = 200`, `top_k = 3`, `embedding_model = "text_embedding_3_small_openrouter"` (a config name in `model_configs_dir`). Constants, not configurable: `RRF_K = 60`, `BM25_K1 = 1.2`, `BM25_B = 0.75`, `RETRIEVER` (the method and its constants, written to every RAG result file) and `CHUNK_SEPARATOR = "\n\n[...]\n\n"` in `rag.py`, `EMBEDDING_BATCH_SIZE = 64` in `embeddings.py`.
 - Chunk sizes are in generator tokens (`APIConnector.encode`/`decode`).
 - The embedding cache defaults to `<repo>/evaluation/results/embedding_cache/` (`DEFAULT_EMBEDDING_CACHE_DIR`, computed from `embeddings.py`'s own location), which is already git-ignored. Cache files are `.sqlite`, so `gather_results` (which loads `.json` only) ignores them.
 - New runtime dependency: only `scikit-learn`. Embeddings use the existing `openai` SDK; there is no torch, onnxruntime or model2vec.
@@ -57,6 +57,7 @@ On 2026-11-24, after a probe showed TF-IDF and BM25 both at chance recall on NoL
 - **Vectors must map to the right texts.** The API may return rows out of order, the SDK defaults to base64, and one call can contain the same text twice. Any of these would silently scramble retrieval. Tests: Task 2 `test_send_pins_the_provider_requests_floats_and_orders_rows`, `test_duplicate_texts_are_sent_once`.
 - **The embedding cache answers only identical requests and keeps paid-for work.** A different model, endpoint or provider pin must miss. A failed request must not be cached, and the batches that did succeed must stay cached. Tests: Task 2 `test_cache_round_trip_and_key`, `test_second_call_is_served_from_cache`, `test_failed_request_is_not_cached`, and the Task 5 re-run of the 1K smoke test (0 tokens sent).
 - **The haystack fits in `top_k` chunks** (250 to 2K with the defaults). The prompt must then be the full-context prompt byte for byte, even with a lossy `decode`, so scores match and the request cache answers. Tests: Task 1 `test_context_is_the_original_text_when_every_chunk_is_retrieved`, Task 3 `test_rag_that_retrieves_everything_reuses_full_context_requests`, Task 5 smoke run at 1K (all 52 generations from the request cache).
+- **A result file records the retrieval method.** The method lives in code, so `rag.retriever` is its only record, and a result produced by another method must trigger the overwrite warning. Tests: Task 3 `test_rag_prompts_hold_only_the_retrieved_chunks` and `test_a_changed_retrieval_method_warns_on_overwrite`, Task 4 `test_report_shows_retrieval_table_and_warnings`.
 - **The needle crosses a chunk boundary.** It must lie whole in the next chunk, and recall must not count it as missed. If no chunk holds it whole, the report must say so rather than silently counting a miss. Tests: Task 1 `test_needle_across_a_chunk_boundary_is_whole_in_the_next_chunk` and `test_needle_missing_from_every_chunk_has_no_rank`, Task 4 `test_report_shows_retrieval_table_and_warnings`.
 
 ---
@@ -72,6 +73,7 @@ On 2026-11-24, after a probe showed TF-IDF and BM25 both at chance recall on NoL
 - Consumes: nothing from other tasks. `encode`/`decode` have the signatures of `APIConnector.encode(text) -> list` and `APIConnector.decode(tokens) -> str`. `embed` has the signature of `Embedder.embed` from Task 2: `async (texts: list[str]) -> tuple[np.ndarray, dict]`.
 - Produces (in `rag.py`):
   - `RRF_K = 60`, `BM25_K1 = 1.2`, `BM25_B = 0.75`, `CHUNK_SEPARATOR = "\n\n[...]\n\n"`
+  - `RETRIEVER = {"lexical": "bm25", "bm25_k1": BM25_K1, "bm25_b": BM25_B, "rrf_k": RRF_K}`: the retrieval method as written to result files; change it together with the method
   - `@dataclass(frozen=True) class RAGConfig: chunk_size: int = 1000; chunk_overlap: int = 200; top_k: int = 3; embedding_model: str = "text_embedding_3_small_openrouter"`. `__post_init__` raises `ValueError` unless `chunk_size >= 1`, `0 <= chunk_overlap < chunk_size` and `top_k >= 1`.
   - `chunk_spans(n_tokens: int, chunk_size: int, chunk_overlap: int) -> list[tuple[int, int]]`
   - `merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]`: sorted, overlapping or touching spans merged
@@ -427,16 +429,16 @@ git commit -m "Add an OpenRouter embedding client with an SQLite embedding cache
 
 **Interfaces:**
 - Consumes:
-  - from Task 1: `RAGConfig` and `retrieve_context`;
+  - from Task 1: `RAGConfig`, `RETRIEVER` and `retrieve_context`;
   - from Task 2: `load_embedder`, `DEFAULT_EMBEDDING_CACHE_DIR`, and `Embedder.embed` / `Embedder.logged_config`.
 
-  All are imported by name into `async_evaluate`, so tests can patch `async_evaluate.load_embedder`.
+  All are imported by name into `async_evaluate`, so tests can patch `async_evaluate.load_embedder` and `async_evaluate.RETRIEVER`.
 - Produces:
   - `NoLiMa_Tester(..., rag: Optional[RAGConfig] = None, embedding_cache_dir: str = DEFAULT_EMBEDDING_CACHE_DIR)`. When `rag` is set, `__init__` creates `self.embedder = load_embedder(rag.embedding_model, model_configs_dir, embedding_cache_dir)`.
-  - Result file: top-level `"rag": {**dataclasses.asdict(rag), "embedding_config": self.embedder.logged_config}`, only when RAG is on. Each per-request result gets `"rag"`: the info dict from `retrieve_context`.
+  - Result file: top-level `"rag": {**dataclasses.asdict(rag), "retriever": dict(RETRIEVER), "embedding_config": self.embedder.logged_config}`, only when RAG is on. Each per-request result gets `"rag"`: the info dict from `retrieve_context`.
   - Run config: an optional `rag:` block with the `RAGConfig` fields, where omitted fields take their defaults, and `embedding_cache_dir`.
 
-- [ ] **Step 1: Write the failing tests** (append to `tests/test_async_evaluate.py`; add `import numpy as np`, `import async_evaluate` and `from rag import RAGConfig` to its imports)
+- [ ] **Step 1: Write the failing tests** (append to `tests/test_async_evaluate.py`; add `import numpy as np`, `import async_evaluate` and `from rag import RETRIEVER, RAGConfig` to its imports)
 
 ```python
 class KiasmaEmbedder:
@@ -466,6 +468,7 @@ def test_rag_prompts_hold_only_the_retrieved_chunks(make_tester, sent, fake_embe
     assert set(saved) == RESULT_KEYS | {"rag"}
     assert saved["rag"] == {"chunk_size": 100, "chunk_overlap": 60, "top_k": 1,
                             "embedding_model": "text_embedding_3_small_openrouter",
+                            "retriever": {"lexical": "bm25", "bm25_k1": 1.2, "bm25_b": 0.75, "rrf_k": 60},
                             "embedding_config": {"model": "fake/embedding"}}
 
 
@@ -479,19 +482,26 @@ def test_changing_rag_settings_warns_on_overwrite(make_tester, sent, fake_embedd
     make_tester(str(tmp_path / "run")).evaluate()
     make_tester(str(tmp_path / "run"), rag=SMALL_RAG).evaluate()
     assert "produced with different settings: rag." in capsys.readouterr().out
+
+
+def test_a_changed_retrieval_method_warns_on_overwrite(make_tester, sent, fake_embedder, tmp_path, capsys, monkeypatch):
+    make_tester(str(tmp_path / "run"), rag=SMALL_RAG).evaluate()
+    monkeypatch.setattr(async_evaluate, "RETRIEVER", {**RETRIEVER, "lexical": "tfidf"})
+    make_tester(str(tmp_path / "run"), rag=SMALL_RAG).evaluate()   # same settings, another method
+    assert "produced with different settings: rag." in capsys.readouterr().out
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/test_async_evaluate.py -v`
-Expected: the three new tests fail, first with `ImportError: cannot import name 'RAGConfig'`, or `TypeError: ... unexpected keyword argument 'rag'` once the import works. The old tests still pass.
+Expected: the four new tests fail, first with `ImportError: cannot import name 'RAGConfig'`, or `TypeError: ... unexpected keyword argument 'rag'` once the import works. The old tests still pass.
 
 - [ ] **Step 3: Implement.** In `evaluate()`, when `self.rag` is set, the task appended to `async_tasks` for a placement is a coroutine that does three things:
   1. awaits `retrieve_context(placement_output["text"], retrieval_question, needle, self.rag, self.api_connector.encode, self.api_connector.decode, self.embedder.embed)`;
   2. awaits `generate_response` on the template filled with the returned context;
   3. returns `{**response, "rag": info}`.
 
-  The existing merge loop then copies `rag` into the result. `retrieval_question` and `needle` are the locals that already have `{CHAR}` substituted; pass them as arguments, not closures over loop variables. Without RAG the task stays exactly as it is now. Add the top-level `outputs["rag"]` next to the `distractor` key, only when set.
+  The existing merge loop then copies `rag` into the result. `retrieval_question` and `needle` are the locals that already have `{CHAR}` substituted; pass them as arguments, not closures over loop variables. Without RAG the task stays exactly as it is now. Add the top-level `outputs["rag"]` (as in Produces, reading the module-level `RETRIEVER` when the file is written) next to the `distractor` key, only when set.
 
   In `run_tests.py`:
   - add `parser.add_argument("--rag", type=Optional[RAGConfig], default=None, help="RAG baseline: answer from the top_k retrieved chunks of the haystack instead of the whole haystack")` and `parser.add_argument("--embedding_cache_dir", type=str, default=DEFAULT_EMBEDDING_CACHE_DIR, help="Directory of the embedding cache, shared by all runs")`;
@@ -525,11 +535,11 @@ git commit -m "Answer from retrieved chunks when a run config has a rag block"
 - Test: `tests/test_gather_results.py`
 
 **Interfaces:**
-- Consumes: the result-file fields from Task 3: top-level `rag` (with `top_k`) and per-request `rag` (`n_chunks`, `context_tokens`, `needle_retrieved`, `needle_rank`, `embedding`).
+- Consumes: the result-file fields from Task 3: top-level `rag` (with `top_k` and `retriever`) and per-request `rag` (`n_chunks`, `context_tokens`, `needle_retrieved`, `needle_rank`, `embedding`).
 - Produces:
   - CSV: `rag.<field>` columns, flattened like `model_config.<field>`, plus `n_needle_retrieved`, `embedding_tokens` and `embedding_cost`, all only for RAG files.
   - Report, per run with RAG results:
-    - a `- **RAG:** ` settings line (the four `RAGConfig` fields) under the model config line;
+    - a `- **RAG:** ` settings line (the four `RAGConfig` fields, then `retriever` as `key=value` pairs in file order) under the model config line;
     - a `### Retrieval` table between `### Per context length` and `### Per test`, with these columns:
       - context length;
       - mean chunks and mean context tokens;
@@ -545,6 +555,7 @@ git commit -m "Answer from retrieved chunks when a run config has a rag block"
 def rag_data():
     data = result_data()
     data["rag"] = {"chunk_size": 1000, "chunk_overlap": 200, "top_k": 3, "embedding_model": "e",
+                   "retriever": {"lexical": "bm25", "bm25_k1": 1.2, "bm25_b": 0.75, "rrf_k": 60},
                    "embedding_config": {"model": "openai/text-embedding-3-small"}}
     ranks = [(1, 2, 1), (4, 1, 6), (None, None, None)]   # (hybrid, bm25, dense); the last needle was in no chunk
     for r, (hybrid, bm25, dense) in zip(data["results"], ranks):
@@ -559,6 +570,7 @@ def rag_data():
 def test_summarized_result_flattens_rag_settings():
     s = get_summarized_result(rag_data())
     assert s["rag.top_k"] == 3 and s["rag.embedding_model"] == "e" and s["n_needle_retrieved"] == 1
+    assert s["rag.retriever"]["lexical"] == "bm25"
     assert s["embedding_tokens"] == 33000 and s["embedding_cost"] == pytest.approx(0.00066)
     assert "n_needle_retrieved" not in get_summarized_result(result_data())
 
@@ -566,7 +578,8 @@ def test_summarized_result_flattens_rag_settings():
 def test_report_shows_retrieval_table_and_warnings():
     loaded = [("x.json", rag_data())]
     report = build_report(summarize_runs(loaded), summarize_models(loaded), ["results"])
-    assert "- **RAG:** `chunk_size` = 1000, `chunk_overlap` = 200, `top_k` = 3, `embedding_model` = `e`" in report
+    assert ("- **RAG:** `chunk_size` = 1000, `chunk_overlap` = 200, `top_k` = 3, `embedding_model` = `e`, "
+            "`retriever` = `lexical=bm25, bm25_k1=1.2, bm25_b=0.75, rrf_k=60`") in report
     assert ("| Context length | Chunks | Context tokens | Needle retrieved | BM25 alone | Dense alone "
             "| Score if retrieved | Score if missed | Embedding tokens sent | Embedding cost |") in report
     assert "| 1K | 10.0 | 2400 | 33.3 | 66.7 | 33.3 | 100.0 | 50.0 | 33,000 | $0.0007 |" in report
@@ -647,6 +660,7 @@ Expected: 6 generations sent, and a Retrieval table with two rows. 1K: 2.0 chunk
   - the embedding cache: location, key, deleting a model's `.sqlite` to re-embed, `embedding_cache_dir`;
   - whether OpenRouter reports embedding cost (from the Task 2 live check);
   - that lengths up to `chunk_size + (top_k − 1) × (chunk_size − chunk_overlap)` equal full context and come from the request cache;
+  - that result files record the retrieval method under `rag.retriever`, and the report shows it on the RAG line;
   - the report's Retrieval table.
 
 - [ ] **Step 6: Commit**
