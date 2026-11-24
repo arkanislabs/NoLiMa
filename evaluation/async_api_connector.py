@@ -14,17 +14,11 @@ import httpx
 
 from functools import cache
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 from typing import Union, List, Optional
 
-from vertexai.preview.tokenization import get_tokenizer_for_model
-import vertexai.preview.generative_models as generative_models
-
-from langchain_aws import ChatBedrockConverse
-
-from google import genai
-from google.genai import types
-from google.genai.errors import ClientError
+# The Gemini (vertexai, google.genai) and AWS (langchain_aws) SDKs are imported where those providers are
+# used: they took about 8 s to import on every run, including runs of other providers
 
 from tenacity import retry, wait_random_exponential, stop_after_delay, retry_if_exception_type, retry_if_exception_message, wait_random
 
@@ -41,6 +35,21 @@ DEFAULT_TOKENIZER_MAPPING = {
 OPENAI_COMPATIBLE_PROVIDERS = ("openai", "vllm", "azure-openai")
 # Request record fields that select the endpoint rather than being arguments of the SDK call
 ENDPOINT_FIELDS = ("api_provider", "api_url")
+
+
+def uses_plain_rust_decode(tokenizer) -> bool:
+    """
+    Whether the tokenizer's decode is just its Rust tokenizer's decode, so calling the Rust one directly gives the
+    same text: a fast tokenizer that doesn't clean up spaces and whose class (e.g. CodeGen, Whisper, or remote
+    code) doesn't override decoding.
+    """
+    cls = type(tokenizer)
+    return (
+        tokenizer.is_fast
+        and not tokenizer.clean_up_tokenization_spaces
+        and cls.decode is PreTrainedTokenizerFast.decode
+        and cls._decode is PreTrainedTokenizerFast._decode
+    )
 
 
 def build_messages(
@@ -159,9 +168,11 @@ class APIConnector:
             
         if self.tokenizer_type == "huggingface":
             self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_model, use_fast=True)
+            self._hf_fast_decode = uses_plain_rust_decode(self.tokenizer)
         elif self.tokenizer_type == "tiktoken":
             self.tokenizer = tiktoken.get_encoding(self.tokenizer_model)
         elif self.tokenizer_type == "google":
+            from vertexai.preview.tokenization import get_tokenizer_for_model
             self.tokenizer = get_tokenizer_for_model(self.tokenizer_model)
         else:
             raise ValueError(f"Invalid tokenizer type: {self.tokenizer_type}")
@@ -187,6 +198,8 @@ class APIConnector:
                 timeout=kwargs["timeout"]
             )
         elif api_provider == "gemini":
+            from google import genai
+            from google.genai import types
             self.api = genai.Client(
                 vertexai=True, project=kwargs["project_ID"], location=kwargs["location"], http_options=types.HttpOptions(timeout=kwargs["http_timeout"] * 1000)
             )
@@ -199,6 +212,7 @@ class APIConnector:
             }
 
         elif api_provider == "aws":
+            from langchain_aws import ChatBedrockConverse
             self.api = ChatBedrockConverse(
                 model=model,
                 temperature=kwargs["temperature"],
@@ -240,6 +254,11 @@ class APIConnector:
             `str`: Decoded text
         """
         if self.tokenizer_type == "huggingface":
+            # The Rust tokenizer directly: transformers' decode first type-checks every token id in Python
+            # (to_py_obj), which took over 90% of a fully cached run. Same text unless the tokenizer cleans
+            # up spaces, so those keep the transformers path (a different prompt would miss the request cache).
+            if self._hf_fast_decode:
+                return self.tokenizer.backend_tokenizer.decode(tokens, skip_special_tokens=False)
             return self.tokenizer.decode(tokens)
         elif self.tokenizer_type == "tiktoken":
             return self.tokenizer.decode(tokens)
@@ -341,6 +360,9 @@ class APIConnector:
             return output
 
         elif self.api_provider == "gemini":
+            from google.genai import types
+            from google.genai.errors import ClientError
+
             @retry(reraise=True, wait=wait_random_exponential(multiplier=self.gemini_retry_config["multiplier"], max=self.gemini_retry_config["maximum"]), stop=stop_after_delay(self.gemini_retry_config["timeout"]), retry=retry_if_exception_type((ClientError, httpx.ConnectTimeout, httpx.TimeoutException)))
             async def generate_content():
                 completion = await self.api.aio.models.generate_content(
