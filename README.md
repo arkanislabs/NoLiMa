@@ -150,6 +150,26 @@ The needle set and haystack data will be downloaded to the `data` directory from
 You can find various needle sets (e.g., CoT-style, multiple choice, direct, distractor-included) in `data/needlesets`.
 Adjust any paths or configurations as needed for your specific environment.
 
+#### RAG baseline
+A run config with a `rag:` block answers from the `top_k` most relevant chunks of the haystack instead of the whole haystack. Without the block, nothing changes. The block has four fields, shown here with their defaults:
+
+```yaml
+rag:
+  chunk_size: 1000        # tokens per chunk
+  chunk_overlap: 200      # tokens shared by neighbouring chunks
+  top_k: 3                # chunks put in the prompt
+  embedding_model: text_embedding_3_small_openrouter   # a config name in model_configs_dir
+```
+
+- Chunk sizes are counted in the generator model's tokens, the same unit as `context_length`.
+- Retrieval is hybrid: Reciprocal Rank Fusion (k = 60) of BM25 (vanilla Okapi, `k1 = 1.2`, `b = 0.75`, the non-negative Lucene IDF) and dense similarity with `text-embedding-3-small` through OpenRouter, pinned to the OpenAI provider. The method is fixed in `evaluation/rag.py`, not configurable. The retrieved chunks are joined in document order and put into the unchanged prompt template.
+- Embeddings are cached in SQLite at `evaluation/results/embedding_cache/<model slug>.sqlite`, one file per embedding model. The key is the SHA-256 of the model, endpoint, provider pin and text. Delete a model's `.sqlite` file to embed again. Set `embedding_cache_dir` in the run config to use another folder.
+- OpenRouter reports the cost of embedding requests, so the end of a run prints the embedding tokens sent and their cost, apart from the generator's cost.
+- Lengths up to `chunk_size + (top_k - 1) * (chunk_size - chunk_overlap)` (2,600 tokens with the defaults, so 250 to 2K) fit in `top_k` chunks. Their prompt equals the full-context prompt, so the generations come from the request cache and only the embeddings cost money.
+- Result files record the retrieval settings under `rag`, including the method as `rag.retriever`. The report shows it on the RAG line and adds a Retrieval table per run: chunks per request, context tokens, how often the needle chunk is in the top `top_k` (hybrid, BM25 alone, dense alone), the score when it was and was not retrieved, and the embedding tokens and cost.
+
+Configs for DeepSeek V4.1 Flash are in `evaluation/run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_c1000_k3_*.yaml`, and `smoke_test_rag_*` are small checks.
+
 ---
 
 ## Haystack Filtering Pipeline

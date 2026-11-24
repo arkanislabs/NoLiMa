@@ -1,0 +1,25 @@
+# RAG smoke test: 1 haystack x 2 tests x 26 depths = 52 requests, all answered from the full-context request cache.
+# Run from evaluation/:
+#   PYTHONPATH=../ TOKENIZERS_PARALLELISM=false uv run python -u run_tests.py --config run_config/smoke_test_rag_deepseek_v4.1_flash_1017_nothink_openrouter_1K.yaml
+model_name: "deepseek_v4.1_flash_1017_nothink_openrouter"
+model_configs_dir: "./model_configs/"
+needle_set_path: "../data/needlesets/needle_set.json"
+haystack_dir: "../data/haystack/rand_shuffle"
+parent_results_dir: "./results/smoke_rag_deepseek_v4.1_flash_1017_nothink_openrouter/CL1K/"
+context_length: 1000
+document_depth_percent_min: 0
+document_depth_percent_max: 100
+document_depth_percent_intervals: 26
+metric: contains
+use_default_system_prompt: true
+haystack_files:
+  - rand_book_1.txt
+test_names:
+  - 0401_T17_C02_onehop
+  - 0401_T17_C02_twohop
+# RAG baseline: answer from the top_k chunks of the haystack (hybrid BM25 + text-embedding-3-small, RRF k=60)
+rag:
+  chunk_size: 1000
+  chunk_overlap: 200
+  top_k: 3
+  embedding_model: text_embedding_3_small_openrouter
