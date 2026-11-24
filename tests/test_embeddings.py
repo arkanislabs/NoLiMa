@@ -117,7 +117,6 @@ def test_response_with_missing_rows_raises_and_caches_nothing(make_embedder):
         asyncio.run(embedder._send(["a", "b", "c"]))
     with pytest.raises(RuntimeError, match="expected indices"):
         asyncio.run(embedder.embed(["a", "b", "c"]))
-    key = embedding_key(MODEL, URL, PIN, "a")
     assert embedder.cache.get_many([embedding_key(MODEL, URL, PIN, t) for t in "abc"]) == {}
 
 
