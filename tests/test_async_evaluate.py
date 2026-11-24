@@ -244,3 +244,14 @@ def test_a_changed_retrieval_method_warns_on_overwrite(make_tester, sent, fake_e
     monkeypatch.setattr(async_evaluate, "RETRIEVER", {**RETRIEVER, "lexical": "tfidf"})
     make_tester(str(tmp_path / "run"), rag=SMALL_RAG).evaluate()   # same settings, another method
     assert "produced with different settings: rag." in capsys.readouterr().out
+
+
+def test_a_given_embedder_is_reused(make_tester, sent, monkeypatch, tmp_path):
+    def must_not_load(*args, **kwargs):
+        raise AssertionError("load_embedder was called")
+
+    monkeypatch.setattr(async_evaluate, "load_embedder", must_not_load)
+    embedder = KiasmaEmbedder()
+    tester = make_tester(str(tmp_path / "run"), rag=SMALL_RAG, embedder=embedder)
+    assert tester.embedder is embedder
+    assert all(r["rag"]["needle_retrieved"] for r in tester.evaluate())

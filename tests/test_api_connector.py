@@ -159,3 +159,18 @@ def test_rust_decode_only_when_it_gives_the_same_text():
     assert uses_plain_rust_decode(_fast_tokenizer(clean_up_tokenization_spaces=False))
     assert not uses_plain_rust_decode(_fast_tokenizer(clean_up_tokenization_spaces=True))
     assert not uses_plain_rust_decode(_fast_tokenizer(CustomDecode, clean_up_tokenization_spaces=False))
+
+
+def test_encode_runs_in_threads_only_for_rust_tokenizers():
+    from transformers import PreTrainedTokenizerFast
+    from async_api_connector import encodes_in_rust
+
+    class CustomEncode(PreTrainedTokenizerFast):  # Python code between the caller and the Rust tokenizer
+        def _batch_encode_plus(self, *args, **kwargs):
+            return super()._batch_encode_plus(*args, **kwargs)
+
+    assert encodes_in_rust("huggingface", _fast_tokenizer())
+    assert not encodes_in_rust("huggingface", _fast_tokenizer(CustomEncode))
+    assert not encodes_in_rust("huggingface", SimpleNamespace(is_fast=False))   # a Python ("slow") tokenizer
+    assert encodes_in_rust("tiktoken", object())
+    assert not encodes_in_rust("google", object())   # sentencepiece

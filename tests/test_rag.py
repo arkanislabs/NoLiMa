@@ -112,3 +112,17 @@ def test_no_embedding_when_every_chunk_is_retrieved():
                                    "dense": info["needle_chunks"][0] + 1}
     assert info["embedding"] == {"texts_sent": 0, "cache_hits": 0, "tokens": 0, "cost": 0.0}
     assert retrieve(FILLER + NEEDLE + "\n" + FILLER)[1]["ranked"] is True
+
+
+def test_encoding_in_a_thread_gives_the_same_result():
+    import threading
+    threads = []
+
+    def tracking_encode(text):
+        threads.append(threading.current_thread())
+        return encode(text)
+
+    text = FILLER + NEEDLE + "\n" + FILLER
+    threaded = asyncio.run(retrieve_context(text, QUESTION, NEEDLE, CONFIG, tracking_encode, decode, keyword_embed,
+                                            encode_in_thread=True))
+    assert threaded == retrieve(text) and threads[0] is not threading.main_thread()

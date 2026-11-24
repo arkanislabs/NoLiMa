@@ -6,6 +6,7 @@ the question by BM25 and by embedding cosine similarity, and the fused top-k win
 the context the generator sees. The retriever never learns where the needle is; the needle is
 only used afterwards, to log where it ranked.
 """
+import asyncio
 import math
 from dataclasses import dataclass
 from typing import Callable
@@ -109,12 +110,25 @@ def _cosine(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return np.divide(dots, norms, out=np.zeros(len(matrix)), where=norms > 0)
 
 
-async def retrieve_context(text: str, question: str, needle: str, config: RAGConfig,
-                           encode: Callable, decode: Callable, embed: Callable) -> tuple[str, dict]:
-    """Return the top-k hybrid-ranked chunks of `text` as context, and a log of the retrieval."""
+def _chunk(text: str, config: RAGConfig, encode: Callable, decode: Callable) -> tuple[list, list, list[str]]:
+    """The tokens of `text`, its chunk spans and the decoded chunks."""
     tokens = encode(text)
     spans = chunk_spans(len(tokens), config.chunk_size, config.chunk_overlap)
-    chunks = [decode(tokens[a:b]) for a, b in spans]
+    return tokens, spans, [decode(tokens[a:b]) for a, b in spans]
+
+
+async def retrieve_context(text: str, question: str, needle: str, config: RAGConfig,
+                           encode: Callable, decode: Callable, embed: Callable,
+                           encode_in_thread: bool = False) -> tuple[str, dict]:
+    """
+    Return the top-k hybrid-ranked chunks of `text` as context, and a log of the retrieval. With `encode_in_thread`,
+    tokenizing and chunking run in a worker thread, so that concurrent requests tokenize in parallel; only pass it
+    for a thread-safe tokenizer that releases the GIL (`APIConnector.encode_in_thread`).
+    """
+    if encode_in_thread:
+        tokens, spans, chunks = await asyncio.to_thread(_chunk, text, config, encode, decode)
+    else:
+        tokens, spans, chunks = _chunk(text, config, encode, decode)
     ranked = len(chunks) > config.top_k
     if ranked:
         vectors, usage = await embed([question] + chunks)

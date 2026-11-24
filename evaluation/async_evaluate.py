@@ -20,7 +20,7 @@ from request_cache import RequestCache, DEFAULT_REQUEST_CACHE_DIR, cost_summary,
 
 from jsonargparse import ArgumentParser, ActionConfigFile
 from data.book_haystack import BookHaystack
-from embeddings import DEFAULT_EMBEDDING_CACHE_DIR, load_embedder
+from embeddings import DEFAULT_EMBEDDING_CACHE_DIR, Embedder, load_embedder
 from rag import RAGConfig, RETRIEVER, retrieve_context
 
 
@@ -83,7 +83,8 @@ class NoLiMa_Tester:
         api_connector: Optional[APIConnector] = None,
         haystack: Optional[BookHaystack] = None,
         rag: Optional[RAGConfig] = None,
-        embedding_cache_dir: str = DEFAULT_EMBEDDING_CACHE_DIR
+        embedding_cache_dir: str = DEFAULT_EMBEDDING_CACHE_DIR,
+        embedder: Optional[Embedder] = None
     ) -> None:
         """
         `api_connector` and `haystack`, when given, are reused instead of built: loading a tokenizer takes
@@ -92,7 +93,8 @@ class NoLiMa_Tester:
         config (request_cache_dir and use_request_cache are then ignored), and `haystack` must be the book at
         `haystack_path`, tokenized (if at all) with that connector's tokenizer.
         `rag`, when given, answers each request from the `top_k` chunks of its haystack that the retriever
-        picks instead of the whole haystack; embeddings are cached in `embedding_cache_dir`.
+        picks instead of the whole haystack; embeddings are cached in `embedding_cache_dir`. `embedder`, when given,
+        is reused instead of loaded, like `api_connector`; it must come from `rag.embedding_model`.
         """
         self.model_name = model_name
         self.model_config_path = os.path.join(model_configs_dir, model_name + ".json")
@@ -163,7 +165,8 @@ class NoLiMa_Tester:
         
         self.rag = rag
         if rag is not None:
-            self.embedder = load_embedder(rag.embedding_model, model_configs_dir, embedding_cache_dir)
+            # Reused like `api_connector`: one embedding client (and its connection pool) for the whole run
+            self.embedder = embedder or load_embedder(rag.embedding_model, model_configs_dir, embedding_cache_dir)
 
         self.log_placements = log_placements_dir != ""
         self.log_placements_dir = log_placements_dir
@@ -188,7 +191,8 @@ class NoLiMa_Tester:
 
     async def _generate_with_rag(self, text: str, question: str, needle: str) -> dict:
         context, info = await retrieve_context(
-            text, question, needle, self.rag, self.api_connector.encode, self.api_connector.decode, self.embedder.embed
+            text, question, needle, self.rag, self.api_connector.encode, self.api_connector.decode, self.embedder.embed,
+            encode_in_thread=self.api_connector.encode_in_thread
         )
         if self._on_retrieval is not None:
             self._on_retrieval(info)

@@ -52,6 +52,21 @@ def uses_plain_rust_decode(tokenizer) -> bool:
     )
 
 
+def encodes_in_rust(tokenizer_type: str, tokenizer) -> bool:
+    """
+    Whether encoding runs in Rust, which releases the GIL, so that encodes in worker threads run in parallel: tiktoken,
+    and a fast Hugging Face tokenizer whose class (unlike remote-code ones) doesn't override the encoding path. Python
+    ("slow") and sentencepiece tokenizers are encoded on the calling thread instead, because their thread safety is unknown.
+    """
+    if tokenizer_type == "tiktoken":
+        return True
+    if tokenizer_type != "huggingface" or not tokenizer.is_fast:
+        return False
+    cls = type(tokenizer)
+    return all(getattr(cls, name) is getattr(PreTrainedTokenizerFast, name)
+               for name in ("encode", "encode_plus", "_encode_plus", "_batch_encode_plus"))
+
+
 def build_messages(
     system_prompt: str,
     user_prompt: Union[str, List[str]],
@@ -176,6 +191,8 @@ class APIConnector:
             self.tokenizer = get_tokenizer_for_model(self.tokenizer_model)
         else:
             raise ValueError(f"Invalid tokenizer type: {self.tokenizer_type}")
+        # The RAG baseline encodes whole haystacks (about 0.2 s at 32K tokens): in worker threads when that is safe
+        self.encode_in_thread = encodes_in_rust(self.tokenizer_type, self.tokenizer)
         
         self.SYSTEM_PROMPT = kwargs.get("system_prompt", "You are a helpful assistant")
 

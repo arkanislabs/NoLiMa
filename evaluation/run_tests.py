@@ -148,6 +148,7 @@ if __name__ == "__main__":
     # Built by the first test and reused by the rest: reloading the tokenizer and re-tokenizing each book
     # for every test took most of the time of a run whose requests were all cached
     api_connector = None
+    embedder = None
     for haystack_no, haystack in enumerate(haystacks):
         # Filter inside the loop so haystack_no, and therefore the seed, matches a full run
         if haystack not in selected_haystacks:
@@ -187,9 +188,11 @@ if __name__ == "__main__":
                 api_connector=api_connector,
                 haystack=book,
                 rag=args.rag,
-                embedding_cache_dir=args.embedding_cache_dir
+                embedding_cache_dir=args.embedding_cache_dir,
+                embedder=embedder
             )
             api_connector = tester.api_connector
+            embedder = getattr(tester, "embedder", None)
 
             results = tester.evaluate(progress=progress,
                                       on_retrieval=embedding_progress.add if embedding_progress is not None else None)
