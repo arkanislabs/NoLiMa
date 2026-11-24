@@ -406,7 +406,11 @@ def build_report(summaries: dict, models: dict, results_dirs: list) -> str:
         if s["rag_stats"]:
             lines += ["### Retrieval", "",
                       "Share (%) of requests whose needle chunk is in the top `top_k` chunks by hybrid rank, by BM25 rank alone and by dense rank alone. "
-                      "Score is accuracy (%) on the requests whose needle was retrieved (hybrid) and on those where it was missed.", ""]
+                      "Score is accuracy (%) on the requests whose needle was retrieved (hybrid) and on those where it was missed. "
+                      "BM25 and dense use ordinal ranks that break ties by chunk position, so when every BM25 score is 0, BM25 alone counts a hit "
+                      "exactly when the needle is in the first `top_k` chunks (chance level over uniform depths). "
+                      "Embedding tokens and cost are what each result file recorded when it was written: texts served from the embedding cache count 0, "
+                      "so a re-run shows 0 and $0.", ""]
             header = ["Context length", "Chunks", "Context tokens", "Needle retrieved", "BM25 alone", "Dense alone",
                       "Score if retrieved", "Score if missed", "Embedding tokens sent", "Embedding cost"]
             rows = []
