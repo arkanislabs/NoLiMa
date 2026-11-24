@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A retrieval baseline for NoLiMa. The haystack of each request is split into overlapping token chunks, the chunks are ranked by a hybrid of TF-IDF and `openai/text-embedding-3-small` embeddings, and the model under test answers from the top `top_k` chunks instead of the whole haystack.
+**Goal:** A retrieval baseline for NoLiMa. The haystack of each request is split into overlapping token chunks, the chunks are ranked by a hybrid of BM25 and `openai/text-embedding-3-small` embeddings, and the model under test answers from the top `top_k` chunks instead of the whole haystack.
 
-**Architecture:** `evaluation/rag.py` holds the retrieval method: chunking, TF-IDF, dense scoring, Reciprocal Rank Fusion and context assembly. `evaluation/embeddings.py` holds the embedding client (OpenRouter, pinned to OpenAI) and an on-disk SQLite embedding cache. `NoLiMa_Tester` gets an optional `rag: RAGConfig`. When it is set, each needle placement runs retrieval and then generation in one coroutine, so a test's placements embed and generate concurrently. Each request logs where the needle ranked and what the embeddings cost. Everything else stays the same: needle placement, prompt template, request cache, result files. `gather_results.py` adds a retrieval table to the report.
+**Architecture:** `evaluation/rag.py` holds the retrieval method: chunking, BM25, dense scoring, Reciprocal Rank Fusion and context assembly. `evaluation/embeddings.py` holds the embedding client (OpenRouter, pinned to OpenAI) and an on-disk SQLite embedding cache. `NoLiMa_Tester` gets an optional `rag: RAGConfig`. When it is set, each needle placement runs retrieval and then generation in one coroutine, so a test's placements embed and generate concurrently. Each request logs where the needle ranked and what the embeddings cost. Everything else stays the same: needle placement, prompt template, request cache, result files. `gather_results.py` adds a retrieval table to the report.
 
-**Tech Stack:** Python 3.12, uv, scikit-learn (`TfidfVectorizer`), the existing `openai` SDK (1.53, `AsyncOpenAI.embeddings`) against OpenRouter, stdlib `sqlite3`, pytest.
+**Tech Stack:** Python 3.12, uv, scikit-learn (`CountVectorizer`, for terms and the English stop-word list), the existing `openai` SDK (1.53, `AsyncOpenAI.embeddings`) against OpenRouter, stdlib `sqlite3`, pytest.
 
 **Spec:** No separate spec file. The requests, verbatim (2026-11-23):
 
@@ -16,29 +16,33 @@
 
 > i choose openai/3small update the plan
 
+On 2026-11-24, after a probe showed TF-IDF and BM25 both at chance recall on NoLiMa (see "Expect weak retrieval"):
+
+> update the plan: switch to BM25 the vanilla version
+
 **Prerequisite (outside the code):** the OpenRouter workspace guardrail must allow `openai/text-embedding-3-small`. On 2026-11-23 every embedding model returned 404 "Model blocked by guardrail". The OpenAI provider is already allowed (GPT-4o mini runs on it), so only the model needs adding. Task 2 ends with a live check; stop there if it still returns 404.
 
 ## Design decisions
 
 - **Unit of a chunk: generator tokens.** Chunks are cut from `APIConnector.encode(text)` and decoded with `APIConnector.decode`, the same tokenizer that `context_length` is measured in, so `chunk_size: 1000` means the same "1K" as `CL1K`. The text that gets chunked is exactly the text the full-context run puts in the prompt (`placement_output["text"]`, needle and distractor included). The retriever never learns where the needle is.
 - **Chunking:** fixed windows of `chunk_size` tokens every `chunk_size - chunk_overlap` tokens. The last window ends at the end of the text and may be shorter. Default overlap is 200 tokens. Every NoLiMa needle (under ~50 tokens) therefore lies whole in at least one chunk.
-- **TF-IDF:** `TfidfVectorizer(stop_words="english")`, fitted per request on that request's chunks, cosine against the question. Stop words are removed because sklearn's smoothed IDF never reaches 0, so "which / has / been / to" would otherwise score every chunk.
+- **Lexical: vanilla Okapi BM25** (replaced TF-IDF on 2026-11-24), fitted per request on that request's chunks. A chunk's score is the sum, over the question's distinct terms, of `idf · tf · (k1 + 1) / (tf + k1 · (1 − b + b · dl / avgdl))`, with the usual untuned `k1 = 1.2` and `b = 0.75`. `tf` is the term's count in the chunk, `dl` the chunk's term count, `avgdl` the mean `dl` over the request's chunks, `N` the number of chunks and `df` the number of chunks containing the term. `idf = ln(1 + (N − df + 0.5) / (df + 0.5))`, the IDF of Lucene, Elasticsearch and Pyserini. The textbook `ln((N − df + 0.5) / (df + 0.5))` is negative for a word in more than half the chunks and 0 for a word in one of two chunks. With 2 to 40 chunks per request, that would rank chunks containing a question word below chunks containing none. Terms come from `CountVectorizer(stop_words="english")`: lowercased, sklearn's default token pattern, no stemming. Stop words are removed because a word in every chunk still has a small positive IDF. Without that, "which / has / been / to" would give every chunk a slightly different nonzero score, and the tie handling under Hybrid would no longer see "no lexical signal". The switch does not change recall (see "Expect weak retrieval"). BM25 is used because it is the lexical baseline readers expect.
 - **Embeddings: `openai/text-embedding-3-small` through OpenRouter,** pinned with `{"only": ["openai"], "allow_fallbacks": false}`. It costs $0.02/M tokens and accepts 8,192 input tokens, so a 1K-token chunk is embedded whole (beyond the limit the API returns an error, never a silent truncation). Vectors have 1,536 dimensions. It is called through the repo's `openai` SDK (`AsyncOpenAI(base_url=OpenRouter)`) with `encoding_format="float"`: without it the SDK asks for base64. Connection settings live in a model config JSON (`model_configs/text_embedding_3_small_openrouter.json`, with `${OPENROUTER_API_KEY}`), like the generator configs.
 - **Embedding cache: SQLite, one file per embedding model,** at `evaluation/results/embedding_cache/<model slug>.sqlite`. The key is the SHA-256 of the model, endpoint, provider pin and text; the value is the float32 vector. SQLite rather than the request cache's one-JSON-file-per-entry layout: about 330K vectors × 6 KB ≈ 2 GB for all lengths, against about 10 GB as JSON in 330K files. Rows are committed after each API request, so an interrupted run keeps what it paid for. Failed requests are never cached.
 - **Volume and cost.** A chunk that ends before the needle is identical across the 58 tests at the same haystack and depth, so the cache roughly halves the volume. That is about 160M tokens (≈ $3) at 32K and about 330M tokens (≈ $7) for all lengths from 250 to 32K. Re-runs (another `top_k`, the same generator) pay nothing. Chunk texts depend on the generator's tokenizer, so a generator with a different tokenizer embeds again.
-- **Hybrid = Reciprocal Rank Fusion with the standard constant k = 60** (Cormack et al., 2009): `score(chunk) = 1/(60 + rank_tfidf) + 1/(60 + rank_dense)`. There are no weights and no score normalization, and k is fixed, so nothing is tunable. **Ties share a rank before fusion** (min rank). On NoLiMa the question usually shares no word with any chunk, so all TF-IDF scores are 0. If those ties were broken by position, fusion would favour the first chunks. In the prototype that pushed a dense rank-1 needle chunk down to hybrid rank 3. With shared ranks, a retriever that cannot tell chunks apart adds the same amount to every chunk. Exact ties in the fused score are broken by position, which keeps the result deterministic.
-- **`top_k` (the request's m): default 3**, configurable. That is about 3K retrieved tokens, between the 2K and 4K full-context points. Every request logs the hybrid, TF-IDF and dense rank of the needle chunk, so recall@2 and recall@4 come out of the same run. A `top_k` sweep only needs new runs to measure how answer accuracy changes with more context, and its embeddings all come from the cache.
+- **Hybrid = Reciprocal Rank Fusion with the standard constant k = 60** (Cormack et al., 2009): `score(chunk) = 1/(60 + rank_bm25) + 1/(60 + rank_dense)`. There are no weights and no score normalization, and k (like BM25's k1 and b) is fixed, so nothing is tunable. **Ties share a rank before fusion** (min rank). On NoLiMa the question often shares no word with any chunk, so all BM25 scores are 0: in the 2026-11-24 probe, 86% of requests at about 4K and 39% at about 32K. The chunks that do score (about 5% of them) match topic words such as "drink", "eat" or "character", almost never the needle. If those ties were broken by position, fusion would favour the first chunks. In the prototype that pushed a dense rank-1 needle chunk down to hybrid rank 3. With shared ranks, a retriever that cannot tell chunks apart adds the same amount to every chunk. Exact ties in the fused score are broken by position, which keeps the result deterministic.
+- **`top_k` (the request's m): default 3**, configurable. That is about 3K retrieved tokens, between the 2K and 4K full-context points. Every request logs the hybrid, BM25 and dense rank of the needle chunk, so recall@2 and recall@4 come out of the same run. A `top_k` sweep only needs new runs to measure how answer accuracy changes with more context, and its embeddings all come from the cache.
 - **Context assembly:** the retrieved chunks' token spans are merged where they overlap or touch, put in document order, decoded, and joined with `"\n\n[...]\n\n"`. If the merged spans cover the whole text, the original text is used unchanged. **Consequence:** while the haystack fits in `top_k` chunks (up to 1000 + 2 × 800 = 2600 tokens with the defaults, i.e. 250 to 2K), the RAG prompt is identical to the full-context prompt. Those lengths are then answered from the request cache (only their embeddings are paid for), and the report's base score is the full-context one. From 4K up, RAG differs from full context.
-- **Concurrency:** retrieval runs inside each placement's coroutine, before its generation request, so the existing `asyncio.gather` over a test's 26 placements runs them concurrently. Each placement embeds its question and chunks in one API request (at most 64 inputs per request; a 32K haystack has 40 chunks). TF-IDF takes about 0.15 s for 40 chunks and runs in the coroutine.
+- **Concurrency:** retrieval runs inside each placement's coroutine, before its generation request, so the existing `asyncio.gather` over a test's 26 placements runs them concurrently. Each placement embeds its question and chunks in one API request (at most 64 inputs per request; a 32K haystack has 40 chunks). BM25 takes about 0.04 s for 40 chunks and runs in the coroutine.
 - **Cost tracking:** each request logs `rag.embedding = {texts_sent, cache_hits, tokens, cost}` for its own embedding call. `cost` is what OpenRouter reports, or `None` if it doesn't. The report's retrieval table and the end of a run show embedding tokens and cost, kept apart from the generator's current/total cost.
 - **Prompt:** unchanged `DEFAULT_TASK_TEMPLATE`, with `{haystack}` = the retrieved context.
-- **Expect weak retrieval; that is the finding.** A probe (rand_book_1, 16K window, 20 chunks of 1000/200, the 10 one-hop needle templates × 3 depths, so 30 cases; random recall@3 = 0.15) gave recall@3 of 0.13 for TF-IDF and 0.23 to 0.27 for two small local embedders. NoLiMa removes literal overlap, and one needle sentence is about 2% of a 1K-token chunk. text-embedding-3-small is stronger but still sees the needle diluted. The per-request retrieval log separates retrieval misses from reading errors.
+- **Expect weak retrieval; that is the finding.** A probe (rand_book_1, 16K window, 20 chunks of 1000/200, the 10 one-hop needle templates × 3 depths, so 30 cases; random recall@3 = 0.15) gave recall@3 of 0.13 for TF-IDF and 0.23 to 0.27 for two small local embedders. A second probe (2026-11-24: all 58 needle/question pairs × the 5 books × 5 depths, chunks of 750 words ≈ 1000 tokens with 150 overlap, recall@3 with random tie-breaking) put BM25 and per-request TF-IDF both at chance: 0.600 / 0.315 / 0.074 at about 4K / 8K / 32K, against 0.60 / 0.30 / 0.07 for random retrieval. The needle chunk scored above 0 in only 4% to 6% of requests. With the distractor needle set (`needle_set_w_Distractor.json`, not used by these configs), BM25 ranks the distractor's chunk first in 75% to 97% of requests. NoLiMa removes literal overlap, and one needle sentence is about 2% of a 1K-token chunk. text-embedding-3-small is stronger but still sees the needle diluted. The per-request retrieval log separates retrieval misses from reading errors.
 - **Results:** RAG runs get their own `parent_results_dir` (`<model>_rag_c<size>_k<top_k>`), so `gather_results` reports them as a separate run next to the full-context run. The result file name is unchanged. The `rag` settings, including the redacted embedding config, are a top-level key of the result file (only when RAG is on), so the existing overwrite warning catches RAG and full-context results written to the same folder.
 
 ## Global Constraints
 
 - RAG is off unless the run config has a `rag:` block. Without it, requests, result files (top-level keys = `RESULT_KEYS` in `tests/test_async_evaluate.py`) and reports stay exactly as they are now.
-- Defaults: `chunk_size = 1000`, `chunk_overlap = 200`, `top_k = 3`, `embedding_model = "text_embedding_3_small_openrouter"` (a config name in `model_configs_dir`). Constants, not configurable: `RRF_K = 60` and `CHUNK_SEPARATOR = "\n\n[...]\n\n"` in `rag.py`, `EMBEDDING_BATCH_SIZE = 64` in `embeddings.py`.
+- Defaults: `chunk_size = 1000`, `chunk_overlap = 200`, `top_k = 3`, `embedding_model = "text_embedding_3_small_openrouter"` (a config name in `model_configs_dir`). Constants, not configurable: `RRF_K = 60`, `BM25_K1 = 1.2`, `BM25_B = 0.75` and `CHUNK_SEPARATOR = "\n\n[...]\n\n"` in `rag.py`, `EMBEDDING_BATCH_SIZE = 64` in `embeddings.py`.
 - Chunk sizes are in generator tokens (`APIConnector.encode`/`decode`).
 - The embedding cache defaults to `<repo>/evaluation/results/embedding_cache/` (`DEFAULT_EMBEDDING_CACHE_DIR`, computed from `embeddings.py`'s own location), which is already git-ignored. Cache files are `.sqlite`, so `gather_results` (which loads `.json` only) ignores them.
 - New runtime dependency: only `scikit-learn`. Embeddings use the existing `openai` SDK; there is no torch, onnxruntime or model2vec.
@@ -48,7 +52,8 @@
 
 ## Review Focus
 
-- **The question shares no word with any chunk** (NoLiMa's design), so every TF-IDF score is 0. Fusion must then follow the dense ranking, not chunk position. Test: Task 1 `test_retrieve_context_finds_the_needle_when_tfidf_has_no_signal`. The prototype confirmed it fails when ties are broken by position.
+- **The question shares no word with any chunk** (NoLiMa's design), so every BM25 score is 0. Fusion must then follow the dense ranking, not chunk position. Test: Task 1 `test_retrieve_context_finds_the_needle_when_bm25_has_no_signal`. The prototype confirmed it fails when ties are broken by position.
+- **BM25 is the vanilla formula, and its IDF never goes negative.** `k1 = 1.2`, `b = 0.75`, the `(k1 + 1)` factor, length normalization by the mean chunk length, and a word in every chunk still counts a little. Test: Task 1 `test_bm25_scores`, which checks one score against the formula written out by hand.
 - **Vectors must map to the right texts.** The API may return rows out of order, the SDK defaults to base64, and one call can contain the same text twice. Any of these would silently scramble retrieval. Tests: Task 2 `test_send_pins_the_provider_requests_floats_and_orders_rows`, `test_duplicate_texts_are_sent_once`.
 - **The embedding cache answers only identical requests and keeps paid-for work.** A different model, endpoint or provider pin must miss. A failed request must not be cached, and the batches that did succeed must stay cached. Tests: Task 2 `test_cache_round_trip_and_key`, `test_second_call_is_served_from_cache`, `test_failed_request_is_not_cached`, and the Task 5 re-run of the 1K smoke test (0 tokens sent).
 - **The haystack fits in `top_k` chunks** (250 to 2K with the defaults). The prompt must then be the full-context prompt byte for byte, even with a lossy `decode`, so scores match and the request cache answers. Tests: Task 1 `test_context_is_the_original_text_when_every_chunk_is_retrieved`, Task 3 `test_rag_that_retrieves_everything_reuses_full_context_requests`, Task 5 smoke run at 1K (all 52 generations from the request cache).
@@ -66,19 +71,19 @@
 **Interfaces:**
 - Consumes: nothing from other tasks. `encode`/`decode` have the signatures of `APIConnector.encode(text) -> list` and `APIConnector.decode(tokens) -> str`. `embed` has the signature of `Embedder.embed` from Task 2: `async (texts: list[str]) -> tuple[np.ndarray, dict]`.
 - Produces (in `rag.py`):
-  - `RRF_K = 60`, `CHUNK_SEPARATOR = "\n\n[...]\n\n"`
+  - `RRF_K = 60`, `BM25_K1 = 1.2`, `BM25_B = 0.75`, `CHUNK_SEPARATOR = "\n\n[...]\n\n"`
   - `@dataclass(frozen=True) class RAGConfig: chunk_size: int = 1000; chunk_overlap: int = 200; top_k: int = 3; embedding_model: str = "text_embedding_3_small_openrouter"`. `__post_init__` raises `ValueError` unless `chunk_size >= 1`, `0 <= chunk_overlap < chunk_size` and `top_k >= 1`.
   - `chunk_spans(n_tokens: int, chunk_size: int, chunk_overlap: int) -> list[tuple[int, int]]`
   - `merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]`: sorted, overlapping or touching spans merged
   - `ordinal_ranks(scores: np.ndarray) -> np.ndarray`: 1-based, higher score first, ties by position (what a stand-alone top-k retriever returns)
   - `tied_ranks(scores: np.ndarray) -> np.ndarray`: 1-based, equal scores share the best rank (min / "competition" ranking, numpy only)
   - `rrf_scores(*ranks: np.ndarray) -> np.ndarray`: `Σ 1 / (RRF_K + rank)`
-  - `tfidf_scores(question: str, chunks: list[str]) -> np.ndarray`
+  - `bm25_scores(question: str, chunks: list[str]) -> np.ndarray`: each chunk's BM25 score (Design decisions); all zeros when no chunk has a term or no question term is in the chunks' vocabulary
   - `async retrieve_context(text: str, question: str, needle: str, config: RAGConfig, encode: Callable, decode: Callable, embed: Callable) -> tuple[str, dict]`. It returns the context and an info dict with exactly these keys:
     - `n_chunks: int`
     - `retrieved: list[int]`: chunk indices in hybrid rank order
     - `needle_chunks: list[int]`: indices of chunks containing `needle` whole
-    - `needle_rank: {"hybrid", "tfidf", "dense"}`: the best 1-based ordinal rank of a needle chunk under each ranking, `None` if `needle_chunks` is empty
+    - `needle_rank: {"hybrid", "bm25", "dense"}`: the best 1-based ordinal rank of a needle chunk under each ranking, `None` if `needle_chunks` is empty
     - `needle_retrieved: bool`: hybrid rank ≤ `top_k`
     - `context_tokens: int`: total length of the merged spans
     - `embedding: dict`: the usage dict returned by `embed`, passed through unchanged
@@ -87,12 +92,13 @@
 
 ```python
 import asyncio
+import math
 
 import numpy as np
 import pytest
 
-from rag import (CHUNK_SEPARATOR, RAGConfig, chunk_spans, merge_spans, ordinal_ranks, retrieve_context, rrf_scores,
-                 tfidf_scores, tied_ranks)
+from rag import (CHUNK_SEPARATOR, RAGConfig, bm25_scores, chunk_spans, merge_spans, ordinal_ranks, retrieve_context,
+                 rrf_scores, tied_ranks)
 
 encode = lambda text: [ord(c) for c in text]   # one token per character
 decode = lambda tokens: "".join(map(chr, tokens))
@@ -140,14 +146,19 @@ def test_ranks_and_fusion():
     assert rrf_scores(np.array([1, 2]), np.array([2, 1])).tolist() == pytest.approx([1 / 61 + 1 / 62] * 2)
 
 
-def test_tfidf_scores():
-    chunks = ["the cat sat on the mat", "the dog ran in the park", "a bird flew over the sea"]
-    assert int(np.argmax(tfidf_scores("Which dog was it?", chunks))) == 1
-    assert tfidf_scores("Which one was it there?", chunks).tolist() == [0.0, 0.0, 0.0]  # stop words only
+def test_bm25_scores():
+    chunks = ["dog dog cat", "cat bird", "fish"]   # 3, 2 and 1 terms: avgdl = 2
+    idf_dog = math.log(1 + (3 - 1 + 0.5) / (1 + 0.5))
+    assert bm25_scores("Which dog was it?", chunks).tolist() == pytest.approx(
+        [idf_dog * 2 * (1.2 + 1) / (2 + 1.2 * (1 - 0.75 + 0.75 * 3 / 2)), 0.0, 0.0])
+    assert bm25_scores("Which one was it there?", chunks).tolist() == [0.0, 0.0, 0.0]   # stop words only
+    in_every_chunk = bm25_scores("Which cat?", ["cat dog", "cat bird"])
+    assert in_every_chunk[0] == in_every_chunk[1] > 0   # IDF stays positive, unlike ln((N - df + 0.5) / (df + 0.5))
+    assert bm25_scores("Which dog?", ["the", "it is"]).tolist() == [0.0, 0.0]   # no chunk has a term
 
 
-def test_retrieve_context_finds_the_needle_when_tfidf_has_no_signal():
-    text = FILLER + NEEDLE + "\n" + FILLER   # no question word in any chunk: all TF-IDF scores are 0
+def test_retrieve_context_finds_the_needle_when_bm25_has_no_signal():
+    text = FILLER + NEEDLE + "\n" + FILLER   # no question word in any chunk: all BM25 scores are 0
     context, info = retrieve(text)
     assert NEEDLE in context
     assert info["needle_retrieved"] is True
@@ -165,7 +176,7 @@ def test_context_is_the_original_text_when_every_chunk_is_retrieved():
 def test_non_adjacent_chunks_are_joined_in_document_order():
     text = NEEDLE + "\n" + FILLER + "Helsinki is far.\n"   # dense hits in the first and the last chunk
     context, info = retrieve(text)
-    assert info["retrieved"] == [info["n_chunks"] - 1, 0]   # last chunk also matches "helsinki" in TF-IDF
+    assert info["retrieved"] == [info["n_chunks"] - 1, 0]   # last chunk also matches "helsinki" in BM25
     assert context.startswith(NEEDLE) and context.endswith("Helsinki is far.\n")
     assert context.count(CHUNK_SEPARATOR) == 1
 
@@ -179,7 +190,7 @@ def test_needle_across_a_chunk_boundary_is_whole_in_the_next_chunk():
 def test_needle_missing_from_every_chunk_has_no_rank():
     _, info = retrieve(FILLER)
     assert info["needle_chunks"] == [] and info["needle_retrieved"] is False
-    assert info["needle_rank"] == {"hybrid": None, "tfidf": None, "dense": None}
+    assert info["needle_rank"] == {"hybrid": None, "bm25": None, "dense": None}
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -192,18 +203,18 @@ Expected: collection error `ModuleNotFoundError: No module named 'rag'`
 Run: `uv add scikit-learn`
 Expected: `pyproject.toml` lists it under `dependencies`, `uv.lock` is updated, and `uv run python -c "import sklearn"` exits 0.
 
-- [ ] **Step 4: Implement `evaluation/rag.py`** with the interfaces above. `chunk_spans` starts a window every `chunk_size - chunk_overlap` tokens and stops after the first window that reaches `n_tokens`. `retrieve_context` works in this order:
+- [ ] **Step 4: Implement `evaluation/rag.py`** with the interfaces above. `chunk_spans` starts a window every `chunk_size - chunk_overlap` tokens and stops after the first window that reaches `n_tokens`. `bm25_scores` fits `CountVectorizer(stop_words="english")` on the chunks, takes the question's distinct terms through the same analyzer (`build_analyzer()`) and keeps those in the vocabulary. `fit_transform` raises `ValueError` when no chunk has a term; that case returns zeros. `retrieve_context` works in this order:
 
 ```text
 tokens = encode(text); spans = chunk_spans(len(tokens), ...); chunks = [decode(tokens[a:b]) for a, b in spans]
 vectors, usage = await embed([question] + chunks)
-tfidf  = tfidf_scores(question, chunks)
+bm25   = bm25_scores(question, chunks)
 dense  = cosine of vectors[0] against each of vectors[1:] (a zero vector scores 0)
-hybrid = ordinal_ranks(rrf_scores(tied_ranks(tfidf), tied_ranks(dense)))
+hybrid = ordinal_ranks(rrf_scores(tied_ranks(bm25), tied_ranks(dense)))
 retrieved = chunk indices with hybrid rank 1..top_k, in rank order
 merged = merge_spans(spans of retrieved)
 context = text if merged == [(0, len(tokens))] else CHUNK_SEPARATOR.join(decode(tokens[a:b]) for a, b in merged)
-needle_rank[name] = min ordinal rank of a needle chunk under hybrid / ordinal_ranks(tfidf) / ordinal_ranks(dense)
+needle_rank[name] = min ordinal rank of a needle chunk under hybrid / ordinal_ranks(bm25) / ordinal_ranks(dense)
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
@@ -215,7 +226,7 @@ Expected: all tests pass, including the existing ones.
 
 ```bash
 git add evaluation/rag.py tests/test_rag.py pyproject.toml uv.lock
-git commit -m "Add a hybrid TF-IDF and embedding retriever for a RAG baseline"
+git commit -m "Add a hybrid BM25 and embedding retriever for a RAG baseline"
 ```
 
 ---
@@ -522,7 +533,7 @@ git commit -m "Answer from retrieved chunks when a run config has a rag block"
     - a `### Retrieval` table between `### Per context length` and `### Per test`, with these columns:
       - context length;
       - mean chunks and mean context tokens;
-      - share (%) of requests whose needle chunk is in the top `top_k` by hybrid rank ("Needle retrieved"), by TF-IDF rank alone and by dense rank alone;
+      - share (%) of requests whose needle chunk is in the top `top_k` by hybrid rank ("Needle retrieved"), by BM25 rank alone and by dense rank alone;
       - accuracy (%) on the retrieved requests and on the missed ones (`--` when there are none);
       - embedding tokens sent and embedding cost (`format_cost`; `n/a` when no request reported a cost);
     - a warning counting requests whose needle was in no chunk.
@@ -535,11 +546,11 @@ def rag_data():
     data = result_data()
     data["rag"] = {"chunk_size": 1000, "chunk_overlap": 200, "top_k": 3, "embedding_model": "e",
                    "embedding_config": {"model": "openai/text-embedding-3-small"}}
-    ranks = [(1, 2, 1), (4, 1, 6), (None, None, None)]   # (hybrid, tfidf, dense); the last needle was in no chunk
-    for r, (hybrid, tfidf, dense) in zip(data["results"], ranks):
+    ranks = [(1, 2, 1), (4, 1, 6), (None, None, None)]   # (hybrid, bm25, dense); the last needle was in no chunk
+    for r, (hybrid, bm25, dense) in zip(data["results"], ranks):
         r["rag"] = {"n_chunks": 10, "context_tokens": 2400, "retrieved": [0, 1, 2], "needle_chunks": [],
                     "needle_retrieved": hybrid is not None and hybrid <= 3,
-                    "needle_rank": {"hybrid": hybrid, "tfidf": tfidf, "dense": dense},
+                    "needle_rank": {"hybrid": hybrid, "bm25": bm25, "dense": dense},
                     "embedding": {"texts_sent": 11, "cache_hits": 0, "tokens": 11000, "cost": 0.00022}}
     data["results"][1]["metric"] = 0
     return data
@@ -556,7 +567,7 @@ def test_report_shows_retrieval_table_and_warnings():
     loaded = [("x.json", rag_data())]
     report = build_report(summarize_runs(loaded), summarize_models(loaded), ["results"])
     assert "- **RAG:** `chunk_size` = 1000, `chunk_overlap` = 200, `top_k` = 3, `embedding_model` = `e`" in report
-    assert ("| Context length | Chunks | Context tokens | Needle retrieved | TF-IDF alone | Dense alone "
+    assert ("| Context length | Chunks | Context tokens | Needle retrieved | BM25 alone | Dense alone "
             "| Score if retrieved | Score if missed | Embedding tokens sent | Embedding cost |") in report
     assert "| 1K | 10.0 | 2400 | 33.3 | 66.7 | 33.3 | 100.0 | 50.0 | 33,000 | $0.0007 |" in report
     assert "1 request(s): the needle was not found whole in any chunk, so retrieval counts it as missed." in report
@@ -605,7 +616,7 @@ git commit -m "Report needle retrieval rates and embedding cost for RAG runs"
 - [ ] **Step 1: Write the 8 full-run configs.** Each is a copy of the matching `nolima_deepseek_v4.1_flash_1017_nothink_openrouter_<len>.yaml` with two changes. `parent_results_dir` becomes `./results/deepseek_v4.1_flash_1017_nothink_openrouter_rag_c1000_k3/CL<len>/`. This block is appended:
 
 ```yaml
-# RAG baseline: answer from the top_k chunks of the haystack (hybrid TF-IDF + text-embedding-3-small, RRF k=60)
+# RAG baseline: answer from the top_k chunks of the haystack (hybrid BM25 + text-embedding-3-small, RRF k=60)
 rag:
   chunk_size: 1000
   chunk_overlap: 200
@@ -632,7 +643,7 @@ Expected: 6 generations sent, and a Retrieval table with two rows. 1K: 2.0 chunk
 - [ ] **Step 5: README.** Add a short "RAG baseline" subsection under "Additional Notes". It covers:
   - what the `rag:` block does, and its four fields with their defaults;
   - that chunk sizes are in the model's tokens;
-  - that hybrid means RRF (k = 60) of TF-IDF and `text-embedding-3-small` via OpenRouter, pinned to OpenAI;
+  - that hybrid means RRF (k = 60) of BM25 (vanilla Okapi, `k1 = 1.2`, `b = 0.75`, the non-negative Lucene IDF) and `text-embedding-3-small` via OpenRouter, pinned to OpenAI;
   - the embedding cache: location, key, deleting a model's `.sqlite` to re-embed, `embedding_cache_dir`;
   - whether OpenRouter reports embedding cost (from the Task 2 live check);
   - that lengths up to `chunk_size + (top_k − 1) × (chunk_size − chunk_overlap)` equal full context and come from the request cache;
