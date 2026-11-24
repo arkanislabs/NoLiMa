@@ -15,6 +15,8 @@ from copy import copy
 from jsonargparse import ArgumentParser, ActionConfigFile
 
 from async_evaluate import NoLiMa_Tester
+from embeddings import DEFAULT_EMBEDDING_CACHE_DIR
+from rag import RAGConfig
 from request_cache import DEFAULT_REQUEST_CACHE_DIR, cost_summary, current_cost
 from data.book_haystack import BookHaystack
 
@@ -43,9 +45,11 @@ if __name__ == "__main__":
     parser.add_argument("--haystack_files", type=Optional[List[str]], default=None, help="Run only these files from haystack_dir (e.g. rand_book_1.txt); default runs all")
     parser.add_argument("--request_cache_dir", type=str, default=DEFAULT_REQUEST_CACHE_DIR, help="Directory of the LLM request cache, shared by all runs")
     parser.add_argument("--use_request_cache", type=bool, default=True, help="Answer identical requests from the request cache instead of the API")
+    parser.add_argument("--rag", type=Optional[RAGConfig], default=None, help="RAG baseline: answer from the top_k retrieved chunks of the haystack instead of the whole haystack")
+    parser.add_argument("--embedding_cache_dir", type=str, default=DEFAULT_EMBEDDING_CACHE_DIR, help="Directory of the embedding cache, shared by all runs")
     parser.add_argument("--progress_label", type=str, default="", help="Prefix for the progress bar, e.g. the stage of a multi-run script ([2/5])")
 
-    args = parser.parse_args()
+    args = parser.instantiate_classes(parser.parse_args())
 
     with open(args.needle_set_path, "r") as file:
         needle_set = json.load(file)
@@ -99,7 +103,8 @@ if __name__ == "__main__":
     n_runs = len(selected_haystacks) * len(tests)
     label = f"{args.progress_label} CL{args.context_length}".strip()
     print(f"{label}: {args.model_name}, {len(selected_haystacks)} haystacks x {len(tests)} tests x "
-          f"{args.document_depth_percent_intervals} depths = {n_runs * args.document_depth_percent_intervals} requests")
+          f"{args.document_depth_percent_intervals} depths = {n_runs * args.document_depth_percent_intervals} requests"
+          + (f" (RAG: top {args.rag.top_k} of {args.rag.chunk_size}-token chunks, overlap {args.rag.chunk_overlap})" if args.rag else ""))
     progress = tqdm(total=n_runs * args.document_depth_percent_intervals, desc=label, unit="req", dynamic_ncols=True)
     run_no = 0
     spent = 0.0
@@ -144,7 +149,9 @@ if __name__ == "__main__":
                 request_cache_dir=args.request_cache_dir,
                 use_request_cache=args.use_request_cache,
                 api_connector=api_connector,
-                haystack=book
+                haystack=book,
+                rag=args.rag,
+                embedding_cache_dir=args.embedding_cache_dir
             )
             api_connector = tester.api_connector
 
@@ -154,4 +161,10 @@ if __name__ == "__main__":
     progress.close()
 
     print(f"{label} done. {cost_summary(all_results)}")
+    if args.rag:
+        embeddings = [r["rag"]["embedding"] for r in all_results]
+        costs = [e["cost"] for e in embeddings if e["cost"] is not None]
+        cost = f"${sum(costs):.4f}" if costs else "n/a"
+        print(f"{label} embeddings: {sum(e['tokens'] for e in embeddings):,} tokens sent, cost {cost}, "
+              f"{sum(e['cache_hits'] for e in embeddings):,} texts from the embedding cache")
 

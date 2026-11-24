@@ -7,6 +7,7 @@
 
 import os
 import json
+import dataclasses
 from typing import Optional, Union
 from tqdm import tqdm
 import asyncio
@@ -19,6 +20,8 @@ from request_cache import RequestCache, DEFAULT_REQUEST_CACHE_DIR, cost_summary,
 
 from jsonargparse import ArgumentParser, ActionConfigFile
 from data.book_haystack import BookHaystack
+from embeddings import DEFAULT_EMBEDDING_CACHE_DIR, load_embedder
+from rag import RAGConfig, RETRIEVER, retrieve_context
 
 
 def result_file_name(model_name: str, test_name: str, haystack_path: str, context_length: int) -> str:
@@ -78,7 +81,9 @@ class NoLiMa_Tester:
         request_cache_dir: str = DEFAULT_REQUEST_CACHE_DIR,
         use_request_cache: bool = True,
         api_connector: Optional[APIConnector] = None,
-        haystack: Optional[BookHaystack] = None
+        haystack: Optional[BookHaystack] = None,
+        rag: Optional[RAGConfig] = None,
+        embedding_cache_dir: str = DEFAULT_EMBEDDING_CACHE_DIR
     ) -> None:
         """
         `api_connector` and `haystack`, when given, are reused instead of built: loading a tokenizer takes
@@ -86,6 +91,8 @@ class NoLiMa_Tester:
         repeat for every test even when all requests are cached. `api_connector` must come from the same model
         config (request_cache_dir and use_request_cache are then ignored), and `haystack` must be the book at
         `haystack_path`, tokenized (if at all) with that connector's tokenizer.
+        `rag`, when given, answers each request from the `top_k` chunks of its haystack that the retriever
+        picks instead of the whole haystack; embeddings are cached in `embedding_cache_dir`.
         """
         self.model_name = model_name
         self.model_config_path = os.path.join(model_configs_dir, model_name + ".json")
@@ -154,6 +161,10 @@ class NoLiMa_Tester:
         self.seed = seed
         self.distractor = distractor
         
+        self.rag = rag
+        if rag is not None:
+            self.embedder = load_embedder(rag.embedding_model, model_configs_dir, embedding_cache_dir)
+
         self.log_placements = log_placements_dir != ""
         self.log_placements_dir = log_placements_dir
 
@@ -174,6 +185,19 @@ class NoLiMa_Tester:
             return int(any([gold_answer in response.strip().split("\n")[-1] for gold_answer in gold_answers]))
         else:
             raise ValueError(f"Invalid metric: {self.metric}")
+
+    async def _generate_with_rag(self, text: str, question: str, needle: str) -> dict:
+        context, info = await retrieve_context(
+            text, question, needle, self.rag, self.api_connector.encode, self.api_connector.decode, self.embedder.embed
+        )
+        response = await self.api_connector.generate_response(
+            system_prompt=self.system_prompt,
+            user_prompt=self.task_template.format(haystack=context, question=question),
+            max_tokens=self.model_config["max_tokens"],
+            temperature=self.model_config["temperature"],
+            top_p=self.model_config["top_p"]
+        )
+        return {**response, "rag": info}
 
     def evaluate(self, progress: Optional[tqdm] = None) -> list:
         """
@@ -211,6 +235,10 @@ class NoLiMa_Tester:
         }
         if self.distractor is not None:
             outputs["distractor"] = self.distractor
+        if self.rag is not None:
+            # RETRIEVER is read here, not at import, so the file records the method that produced it
+            outputs["rag"] = {**dataclasses.asdict(self.rag), "retriever": dict(RETRIEVER),
+                              "embedding_config": self.embedder.logged_config}
         # Logged so the report can show the settings the results were produced with
         outputs["model_config"] = self.logged_model_config
         results_path = os.path.join(self.results_dir, f"{self.eval_name}.json")
@@ -245,15 +273,17 @@ class NoLiMa_Tester:
                 distractor=self.distractor
             )
 
-            filled_template = self.task_template.format(haystack=placement_output["text"], question=retrieval_question)
-
-            async_tasks.append(self.api_connector.generate_response(
-                system_prompt=self.system_prompt,
-                user_prompt=filled_template,
-                max_tokens=self.model_config["max_tokens"], 
-                temperature=self.model_config["temperature"],
-                top_p=self.model_config["top_p"]
-            ))
+            if self.rag is None:
+                filled_template = self.task_template.format(haystack=placement_output["text"], question=retrieval_question)
+                async_tasks.append(self.api_connector.generate_response(
+                    system_prompt=self.system_prompt,
+                    user_prompt=filled_template,
+                    max_tokens=self.model_config["max_tokens"], 
+                    temperature=self.model_config["temperature"],
+                    top_p=self.model_config["top_p"]
+                ))
+            else:
+                async_tasks.append(self._generate_with_rag(placement_output["text"], retrieval_question, needle))
 
             api_output["placement_metadata"] = {k: v for k, v in placement_output.items() if k != "text"}
 
