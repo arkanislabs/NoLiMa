@@ -29,12 +29,24 @@ class BookHaystack:
             raise ValueError(f"Book path {book_path} is not supported")
         
         self.text_encoded = None
+        # Decoded token slices by (start, end): each test places its needle in the same slices (they depend only on
+        # depth, context length and shift), so decoding them once per book instead of once per test saves most
+        # of a cached run at long context lengths
+        self._decoded_slices = {}
 
 
     def get_hash(self):
         return hashlib.sha256(self.text.encode()).hexdigest()
         
     
+    def _decode_slice(self, decoding_func: Callable, start: int, end: int, memoize: bool = True) -> str:
+        if not memoize:
+            return decoding_func(self.text_encoded[start:end])
+        key = (decoding_func, int(start), int(end))
+        if key not in self._decoded_slices:
+            self._decoded_slices[key] = decoding_func(self.text_encoded[start:end])
+        return self._decoded_slices[key]
+
     def _generate_w_needle_placement(
         self, 
         needle: str, 
@@ -45,8 +57,9 @@ class BookHaystack:
         shift: int = 0,
         depth: float = 0.5,
         static_depth: float = -1,
+        memoize_decoding: bool = True,
     ) -> dict:
-        
+        """`memoize_decoding=False` for placements at a random depth (distractors), whose slices rarely repeat."""
         if self.text_encoded is None:
             self.text_encoded = encoding_func(self.text)
             self.text_tokens = [decoding_func([i]) for i in self.text_encoded]
@@ -86,9 +99,9 @@ class BookHaystack:
         assert start_pos >= 0
         assert end_pos <= len(self.text_encoded)
 
-        pre_haystack = decoding_func(self.text_encoded[start_pos:self.valid_positions_token_counts[closest_pos_arg]+1])
+        pre_haystack = self._decode_slice(decoding_func, start_pos, self.valid_positions_token_counts[closest_pos_arg]+1, memoize_decoding)
         pre_haystack = pre_haystack[:max(pre_haystack.rfind("\n"), 0)]
-        post_haystack = decoding_func(self.text_encoded[self.valid_positions_token_counts[closest_pos_arg]+1:end_pos])
+        post_haystack = self._decode_slice(decoding_func, self.valid_positions_token_counts[closest_pos_arg]+1, end_pos, memoize_decoding)
 
         return {
             "text": pre_haystack + " " + needle + "\n" + post_haystack,
@@ -151,7 +164,8 @@ class BookHaystack:
                 context_length,
                 shift,
                 dist_depth,
-                static_depth
+                static_depth,
+                memoize_decoding=False
             )
 
             distr_char_pos = placement_w_distractor["text"].index(distractor)
