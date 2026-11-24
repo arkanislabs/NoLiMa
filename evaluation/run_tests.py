@@ -22,6 +22,41 @@ from data.book_haystack import BookHaystack
 
 DEFAULT_TASK_TEMPLATE = "You will answer a question based on the following book snippet:\n\n{haystack}\n\nUse the information provided in the book snippet to answer the question. Your answer should be short and based on either explicitly stated facts or strong, logical inferences.\n\nQuestion: {question}\n\n Return only the final answer with no additional explanation or reasoning."
 
+class EmbeddingProgress:
+    """A second progress bar for RAG runs: retrievals done, embedding tokens sent and their cost, cache hits."""
+
+    def __init__(self, total: int, desc: str):
+        self.bar = tqdm(total=total, desc=desc, unit="req", dynamic_ncols=True, position=1)
+        self.tokens = self.cache_hits = self.skipped = 0
+        self.cost = 0.0
+        self.cost_unknown = False
+        self._show()
+
+    def add(self, info: dict) -> None:
+        """Count one request's retrieval log (the `rag` entry of a result)."""
+        usage = info["embedding"]
+        self.tokens += usage["tokens"]
+        self.cache_hits += usage["cache_hits"]
+        self.skipped += not info["ranked"]
+        if usage["cost"] is None:
+            self.cost_unknown = self.cost_unknown or usage["texts_sent"] > 0
+        else:
+            self.cost += usage["cost"]
+        self.bar.update(1)
+        self._show()
+
+    def summary(self) -> str:
+        cost = f"${self.cost:.4f}" + (" + unreported" if self.cost_unknown else "")
+        return (f"{self.tokens:,} tokens sent, cost {cost}, {self.cache_hits:,} texts from the embedding cache, "
+                f"{self.skipped:,} requests not embedded (every chunk retrieved)")
+
+    def _show(self) -> None:
+        self.bar.set_postfix_str(self.summary(), refresh=False)
+
+    def close(self) -> None:
+        self.bar.close()
+
+
 if __name__ == "__main__":
     parser = ArgumentParser(description="NoLiMa Multi-setup Tester")
     parser.add_argument('--config', action=ActionConfigFile, help='Path to a configuration YAML file.')
@@ -106,6 +141,7 @@ if __name__ == "__main__":
           f"{args.document_depth_percent_intervals} depths = {n_runs * args.document_depth_percent_intervals} requests"
           + (f" (RAG: top {args.rag.top_k} of {args.rag.chunk_size}-token chunks, overlap {args.rag.chunk_overlap})" if args.rag else ""))
     progress = tqdm(total=n_runs * args.document_depth_percent_intervals, desc=label, unit="req", dynamic_ncols=True)
+    embedding_progress = EmbeddingProgress(progress.total, f"{label} embeddings") if args.rag else None
     run_no = 0
     spent = 0.0
     all_results = []
@@ -155,16 +191,15 @@ if __name__ == "__main__":
             )
             api_connector = tester.api_connector
 
-            results = tester.evaluate(progress=progress)
+            results = tester.evaluate(progress=progress,
+                                      on_retrieval=embedding_progress.add if embedding_progress is not None else None)
             spent += sum(c for c in map(current_cost, results) if c is not None)
             all_results += results
     progress.close()
+    if embedding_progress is not None:
+        embedding_progress.close()
 
     print(f"{label} done. {cost_summary(all_results)}")
-    if args.rag:
-        embeddings = [r["rag"]["embedding"] for r in all_results]
-        costs = [e["cost"] for e in embeddings if e["cost"] is not None]
-        cost = f"${sum(costs):.4f}" if costs else "n/a"
-        print(f"{label} embeddings: {sum(e['tokens'] for e in embeddings):,} tokens sent, cost {cost}, "
-              f"{sum(e['cache_hits'] for e in embeddings):,} texts from the embedding cache")
+    if embedding_progress is not None:
+        print(f"{label} embeddings: {embedding_progress.summary()}")
 

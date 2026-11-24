@@ -115,11 +115,17 @@ async def retrieve_context(text: str, question: str, needle: str, config: RAGCon
     tokens = encode(text)
     spans = chunk_spans(len(tokens), config.chunk_size, config.chunk_overlap)
     chunks = [decode(tokens[a:b]) for a, b in spans]
-    vectors, usage = await embed([question] + chunks)
-    vectors = np.asarray(vectors, dtype=float)
-
-    bm25 = bm25_scores(question, chunks)
-    dense = _cosine(vectors[0], vectors[1:])
+    ranked = len(chunks) > config.top_k
+    if ranked:
+        vectors, usage = await embed([question] + chunks)
+        vectors = np.asarray(vectors, dtype=float)
+        bm25 = bm25_scores(question, chunks)
+        dense = _cosine(vectors[0], vectors[1:])
+    else:
+        # Every chunk is retrieved whatever the scores: skip the embedding request. Ranks are chunk positions,
+        # all within top_k, so the needle counts as retrieved under every ranking, as it would after scoring.
+        usage = {"texts_sent": 0, "cache_hits": 0, "tokens": 0, "cost": 0.0}
+        bm25 = dense = np.zeros(len(chunks))
     hybrid = ordinal_ranks(rrf_scores(tied_ranks(bm25), tied_ranks(dense)))
 
     retrieved = [int(i) for i in np.argsort(hybrid)[:config.top_k]]
@@ -134,6 +140,7 @@ async def retrieve_context(text: str, question: str, needle: str, config: RAGCon
     needle_rank = {name: int(min(r[needle_chunks])) if needle_chunks else None for name, r in rankings.items()}
     info = {
         "n_chunks": len(chunks),
+        "ranked": ranked,
         "retrieved": retrieved,
         "needle_chunks": needle_chunks,
         "needle_rank": needle_rank,

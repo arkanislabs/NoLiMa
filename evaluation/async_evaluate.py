@@ -8,7 +8,7 @@
 import os
 import json
 import dataclasses
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 from tqdm import tqdm
 import asyncio
 
@@ -190,6 +190,8 @@ class NoLiMa_Tester:
         context, info = await retrieve_context(
             text, question, needle, self.rag, self.api_connector.encode, self.api_connector.decode, self.embedder.embed
         )
+        if self._on_retrieval is not None:
+            self._on_retrieval(info)
         response = await self.api_connector.generate_response(
             system_prompt=self.system_prompt,
             user_prompt=self.task_template.format(haystack=context, question=question),
@@ -199,12 +201,14 @@ class NoLiMa_Tester:
         )
         return {**response, "rag": info}
 
-    def evaluate(self, progress: Optional[tqdm] = None) -> list:
+    def evaluate(self, progress: Optional[tqdm] = None, on_retrieval: Optional[Callable[[dict], None]] = None) -> list:
         """
         Runs the test, (over)writes its result file and returns the per-request results. Requests
         already in the request cache are not sent again, so re-running a test only pays for what is missing.
         `progress`, when given, is advanced by one as each request finishes and receives this test's messages.
+        `on_retrieval`, when given, is called with each request's retrieval log (RAG only) as soon as its retrieval is done.
         """
+        self._on_retrieval = on_retrieval
         write = progress.write if progress is not None else print
         np.random.seed(self.seed)
         outputs = {

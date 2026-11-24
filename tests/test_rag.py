@@ -98,3 +98,17 @@ def test_needle_missing_from_every_chunk_has_no_rank():
     _, info = retrieve(FILLER)
     assert info["needle_chunks"] == [] and info["needle_retrieved"] is False
     assert info["needle_rank"] == {"hybrid": None, "bm25": None, "dense": None}
+
+
+def test_no_embedding_when_every_chunk_is_retrieved():
+    async def must_not_embed(texts):
+        raise AssertionError("embed was called")
+
+    text = "x" * 100 + NEEDLE + "\n" + "y" * 150   # 299 tokens: chunks [0, 200) and [140, 299), top_k = 2
+    context, info = asyncio.run(retrieve_context(text, QUESTION, NEEDLE, CONFIG, encode, decode, must_not_embed))
+    assert context == text and info["n_chunks"] == 2 and info["ranked"] is False
+    assert info["retrieved"] == [0, 1] and info["needle_retrieved"] is True
+    assert info["needle_rank"] == {"hybrid": info["needle_chunks"][0] + 1, "bm25": info["needle_chunks"][0] + 1,
+                                   "dense": info["needle_chunks"][0] + 1}
+    assert info["embedding"] == {"texts_sent": 0, "cache_hits": 0, "tokens": 0, "cost": 0.0}
+    assert retrieve(FILLER + NEEDLE + "\n" + FILLER)[1]["ranked"] is True
