@@ -3,8 +3,11 @@ import json
 
 import pytest
 
+import async_api_connector
 from async_api_connector import APIConnector
 from async_evaluate import NoLiMa_Tester, result_file_name
+from conftest import CharTokenizer
+from data.book_haystack import BookHaystack
 
 MODEL_CONFIG = {
     "model": "test/model",
@@ -115,6 +118,46 @@ def test_failed_request_keeps_successful_responses_in_cache(make_tester, sent, f
     make_tester(str(tmp_path / "run")).evaluate()  # resume into the same folder
     assert len(sent) == 4  # 3 first attempt + 1 retry of the failed one
     assert len(list((tmp_path / "run").glob("*.json"))) == 1
+
+
+@pytest.fixture
+def tokenizer_calls(monkeypatch):
+    """Counts tokenizer loads and encode calls (only a haystack's book preparation encodes)."""
+    calls = {"loads": 0, "encodes": 0}
+
+    class CountingTokenizer(CharTokenizer):
+        def encode(self, text):
+            calls["encodes"] += 1
+            return super().encode(text)
+
+    def load(name):
+        calls["loads"] += 1
+        return CountingTokenizer()
+
+    monkeypatch.setattr(async_api_connector.tiktoken, "get_encoding", load)
+    return calls
+
+
+def test_tests_sharing_a_connector_and_haystack_load_the_tokenizer_and_tokenize_the_book_once(
+        make_tester, sent, tokenizer_calls, tmp_path):
+    other_needle = "Actually, {CHAR} has seen the Kiasma museum."
+    first = make_tester(str(tmp_path / "run1"))
+    second = make_tester(str(tmp_path / "run2"), needle=other_needle,
+                         api_connector=first.api_connector, haystack=first.haystack)
+    first.evaluate()
+    shared = second.evaluate()
+    assert tokenizer_calls == {"loads": 1, "encodes": 1}
+    # Same prompts as a test that shares nothing, so sharing never changes a cache key
+    alone = make_tester(str(tmp_path / "run3"), needle=other_needle).evaluate()
+    assert [r["request_hash"] for r in shared] == [r["request_hash"] for r in alone]
+    assert [r["request_cache_hit"] for r in alone] == [True] * 3
+
+
+def test_haystack_of_another_book_is_rejected(make_tester, tmp_path):
+    other_book = tmp_path / "other_book.txt"
+    other_book.write_text("Another book.\n" * 300)
+    with pytest.raises(ValueError, match="other_book.txt"):
+        make_tester(str(tmp_path / "run"), haystack=BookHaystack(str(other_book)))
 
 
 def test_result_file_name():

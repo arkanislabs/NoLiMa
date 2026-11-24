@@ -76,8 +76,17 @@ class NoLiMa_Tester:
         metric: str = "EM",
         distractor: Union[str, None] = None,
         request_cache_dir: str = DEFAULT_REQUEST_CACHE_DIR,
-        use_request_cache: bool = True
+        use_request_cache: bool = True,
+        api_connector: Optional[APIConnector] = None,
+        haystack: Optional[BookHaystack] = None
     ) -> None:
+        """
+        `api_connector` and `haystack`, when given, are reused instead of built: loading a tokenizer takes
+        about a second and tokenizing a book (done by its first test) a second or two, which would otherwise
+        repeat for every test even when all requests are cached. `api_connector` must come from the same model
+        config (request_cache_dir and use_request_cache are then ignored), and `haystack` must be the book at
+        `haystack_path`, tokenized (if at all) with that connector's tokenizer.
+        """
         self.model_name = model_name
         self.model_config_path = os.path.join(model_configs_dir, model_name + ".json")
 
@@ -92,10 +101,12 @@ class NoLiMa_Tester:
         self.model_config = expand_env_vars(raw_model_config, source=self.model_config_path)
 
         # Identical requests (from this or any earlier run) are answered from the request cache
-        self.api_connector = APIConnector(
-            cache=RequestCache(request_cache_dir) if use_request_cache else None,
-            **self.model_config
-        )
+        if api_connector is None:
+            api_connector = APIConnector(
+                cache=RequestCache(request_cache_dir) if use_request_cache else None,
+                **self.model_config
+            )
+        self.api_connector = api_connector
 
         self.needle = needle
         if gold_answers != "":
@@ -123,8 +134,12 @@ class NoLiMa_Tester:
         
         self.haystack_path = haystack_path
 
-        self.haystack = BookHaystack(self.haystack_path)
-        
+        if haystack is None:
+            haystack = BookHaystack(self.haystack_path)
+        elif not os.path.samefile(haystack.book_path, haystack_path):
+            raise ValueError(f"haystack is the book at {haystack.book_path}, not haystack_path {haystack_path}")
+        self.haystack = haystack
+
         self.results_dir = results_dir
         os.makedirs(results_dir, exist_ok=True)
 

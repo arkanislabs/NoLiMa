@@ -16,6 +16,7 @@ from jsonargparse import ArgumentParser, ActionConfigFile
 
 from async_evaluate import NoLiMa_Tester
 from request_cache import DEFAULT_REQUEST_CACHE_DIR, cost_summary, current_cost
+from data.book_haystack import BookHaystack
 
 DEFAULT_TASK_TEMPLATE = "You will answer a question based on the following book snippet:\n\n{haystack}\n\nUse the information provided in the book snippet to answer the question. Your answer should be short and based on either explicitly stated facts or strong, logical inferences.\n\nQuestion: {question}\n\n Return only the final answer with no additional explanation or reasoning."
 
@@ -103,12 +104,16 @@ if __name__ == "__main__":
     run_no = 0
     spent = 0.0
     all_results = []
+    # Built by the first test and reused by the rest: reloading the tokenizer and re-tokenizing each book
+    # for every test took most of the time of a run whose requests were all cached
+    api_connector = None
     for haystack_no, haystack in enumerate(haystacks):
         # Filter inside the loop so haystack_no, and therefore the seed, matches a full run
         if haystack not in selected_haystacks:
             continue
         haystack_path = os.path.join(args.haystack_dir, haystack)
         haystack_name = haystack.split(".")[0]
+        book = BookHaystack(haystack_path)  # tokenized by its first test
 
         for test in tests:
             run_no += 1
@@ -137,8 +142,11 @@ if __name__ == "__main__":
                 seed=test["seed"] + haystack_no,
                 distractor=test["distractor"],
                 request_cache_dir=args.request_cache_dir,
-                use_request_cache=args.use_request_cache
+                use_request_cache=args.use_request_cache,
+                api_connector=api_connector,
+                haystack=book
             )
+            api_connector = tester.api_connector
 
             results = tester.evaluate(progress=progress)
             spent += sum(c for c in map(current_cost, results) if c is not None)
