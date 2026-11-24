@@ -7,9 +7,12 @@ Suggested entry format:
 
 ## YYYY-MM-DD: <title>
 
+**Research question:**
+
+**Short answer:**
+
 **TL;DR:**
 
-- **Research question:**
 - **Run:**
 - **Commit:**
 - **Model / provider:**
@@ -24,9 +27,12 @@ Notes:
 
 ## 2026-11-20: Reproducing GPT-4o mini from the paper
 
+**Research question:** Can we reproduce the benchmark exactly?
+
+**Short answer:** No.
+
 **TL;DR:** We can run the benchmark end to end with the paper's settings and data. The results don't match exactly, though: our 4K score is 1.4 points below the paper's, and the gap keeps growing with context length. Run-to-run noise explains little of it. The likely cause is on OpenAI's side, which we can't control.
 
-- **Research question:** Can we reproduce the benchmark exactly?
 - **Run:** `gpt_4o_mini_openrouter`, plus `gpt_4o_mini_openrouter_rerun1` (a 1K re-run the same evening to measure noise)
 - **Commit:** `b7a7eb4`
 - **Model / provider:** `openai/gpt-4o-mini` (unpinned alias) via OpenRouter, restricted to OpenAI (`only: ["openai"]`, no fallbacks).
