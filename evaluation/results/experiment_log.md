@@ -41,7 +41,7 @@ Notes:
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | GPT-4.1\* ([GitHub](https://github.com/adobe-research/NoLiMa/tree/main)) | 1M | 16K | 97.0 (82.5) | n/r | n/r | <ins>95.6</ins> | <ins>95.2</ins> | <ins>91.7</ins> | <ins>87.5</ins> | <ins>84.9</ins> | 79.8 | n/r |
 | GPT-4o\* ([paper, Table 3](https://arxiv.org/html/2502.05167v3#A3)) | 128K | 8K | 99.3 (84.4) | n/r | n/r | <ins>98.1</ins> | <ins>98.0</ins> | <ins>95.7</ins> | <ins>89.2</ins> | 81.6 | 69.7 | n/r |
-| **DeepSeek V4.1 Flash, thinking off (ours)** | 1M | **8K** | 97.1 (82.5) | <ins>95.6</ins> | <ins>94.9</ins> | <ins>93.9</ins> | <ins>93.2</ins> | <ins>89.6</ins> | <ins>85.0</ins> | 80.2 | – | \$7.47 |
+| **DeepSeek V4.1 Flash, thinking off (ours)** | 1M | **8K** | 97.1 (82.5) | <ins>95.6</ins> | <ins>94.9</ins> | <ins>93.9</ins> | <ins>93.2</ins> | <ins>89.6</ins> | <ins>85.0</ins> | 80.2 | 74.4 | \$12.90 |
 | Gemini 2.5 Flash, w/o thinking\* ([GitHub](https://github.com/adobe-research/NoLiMa/tree/main)) | 1M | 2K | 94.4 (80.2) | n/r | n/r | <ins>90.1</ins> | <ins>86.1</ins> | 79.4 | 68.2 | 57.9 | 48.4 | n/r |
 
 \* Scores taken from the paper or the authors' GitHub README, not run by us. We couldn't reproduce the benchmark exactly (see the 2026-11-20 entry), so these scores are not exactly comparable with ours. The effective lengths can probably be trusted, though.
@@ -50,16 +50,16 @@ Notes:
 
 - **8K is impressive.** DeepSeek V4.1 Flash costs \$0.03 per million input tokens on OpenRouter, and it keeps 85% of its base score up to 8K, as GPT-4o does.
 - **Failures concentrate in a few two-hop tests.** For example, `0408_T01_C02_twohop` and `0408Inv_T01_C02_twohop` drop from about 90 at 250 to under 10 at 8K. Many one-hop tests stay at 100 up to 16K.
-- **Cut-offs:** 30 requests hit `max_tokens` (`finish_reason: length`), most at 8K (9) and 16K (18). They were scored as wrong unless the partial answer matched.
+- **Cut-offs:** 114 requests hit `max_tokens` (`finish_reason: length`), most at 8K (9), 16K (18) and 32K (84). They were scored as wrong unless the partial answer matched.
 
 ### Reproduction details
 
 - **Run:** `deepseek_v4.1_flash_1017_nothink_openrouter`
-- **Commit:** `d932a45`
+- **Commit:** `d932a45` (250-16K), `2d0bc17` (32K)
 - **Model / provider:** `deepseek/deepseek-v4.1-flash-1017` via OpenRouter, restricted to Cloudflare (`only: ["cloudflare"]`, no fallbacks), reasoning off
 - **Config:** the paper's settings: greedy decoding (`temperature` 0, `top_p` 1), `max_tokens` 192, with the model's own Hugging Face tokenizer (`deepseek-ai/DeepSeek-V4.1-Flash-1017`)
-- **Context lengths:** 250-16K. Each length has 7,540 requests.
-- **Cost:** \$7.47 in total for 250-16K.
+- **Context lengths:** 250-32K. Each length has 7,540 requests.
+- **Cost:** \$12.90 in total: \$7.47 for 250-16K and \$5.42 for 32K.
 
 ## 2026-11-20: Reproducing GPT-4o mini from the paper
 
