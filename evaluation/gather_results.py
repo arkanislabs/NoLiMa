@@ -10,11 +10,18 @@ model_config.<field> columns) and
   current_cost            USD of the requests sent to the API when the file was produced
   total_cost              USD of all requests, including those answered from the request cache
                           (costs are known only when the provider reports them, e.g. OpenRouter)
+RAG result files (a top-level `rag` block) also get
+  rag.<field>             the RAG settings, retriever and embedding config, flattened like model_config
+  n_needle_retrieved      requests whose needle chunk was among the top_k retrieved chunks
+  embedding_tokens        tokens sent to the embedding model for the file's requests
+  embedding_cost          USD the provider reported for those embeddings (empty when not reported)
 
 Report: per run (a parent_results_dir such as results/<run>/CL1K/), the score at
 each context length, base score, threshold and effective length as defined in
 the NoLiMa paper, plus per-test scores, cut-offs, current and total cost and the
-model config, and a warning when a run holds more than one file for the same
+model config, and, for RAG runs, the RAG settings and a retrieval table (needle
+retrieval rate by hybrid, BM25 and dense rank, score on retrieved and missed requests, embedding
+tokens and cost), and a warning when a run holds more than one file for the same
 test, haystack and context length (those requests would be counted twice).
 
 The request cache (evaluation/results/request_cache/) is skipped: its entries are
@@ -103,6 +110,14 @@ def get_summarized_result(data: dict) -> dict:
         data[f"model_config.{key}"] = value
     data.pop("test_hash", None)   # only in files written before re-runs overwrote results
     data.pop("seed", None)
+    rag = data.pop("rag", None)
+    if rag is not None:
+        rag_results = [res.get("rag") or {} for res in results]
+        data["n_needle_retrieved"] = sum(bool(r.get("needle_retrieved")) for r in rag_results)
+        data["embedding_tokens"] = sum((r.get("embedding") or {}).get("tokens") or 0 for r in rag_results)
+        data["embedding_cost"] = sum_or_none([(r.get("embedding") or {}).get("cost") for r in rag_results])
+        for key, value in rag.items():
+            data[f"rag.{key}"] = value
     del data["result_dir"]
     del data["results"]
     return data
@@ -136,12 +151,20 @@ def summarize_runs(loaded: list) -> dict:
     for run, files in sorted(by_run.items()):
         length_stats = defaultdict(lambda: {"n": 0, "correct": 0, "cutoff": 0, "cache_hits": 0, "cost": [], "current_cost": [],
                                             "reasoning": [], "haystacks": set(), "tests": set()})
+        rag_stats = defaultdict(lambda: {"n": 0, "chunks": 0, "context_tokens": 0, "hybrid": 0, "bm25": 0, "dense": 0,
+                                         "found": 0, "retrieved_correct": 0, "missed_correct": 0, "no_needle": 0,
+                                         "embedding_tokens": 0, "embedding_costs": []})
+        rag_settings = {}
+        rag_files = 0
         test_scores = defaultdict(lambda: defaultdict(list))   # test -> length -> metrics
         configs = {}
         files_without_config = 0
         for path, data in files:
             length = data["context_length"]
             stats = length_stats[length]
+            rag = data.get("rag")
+            rag_settings[json.dumps(rag, sort_keys=True)] = rag
+            rag_files += rag is not None
             stats["haystacks"].add(os.path.basename(data.get("haystack_path", "")))
             stats["tests"].add(data["test_name"])
             for res in data["results"]:
@@ -153,6 +176,23 @@ def summarize_runs(loaded: list) -> dict:
                 stats["current_cost"].append(current_cost(res))
                 stats["reasoning"].append(res.get("reasoning_tokens"))
                 test_scores[data["test_name"]][length].append(res["metric"])
+                if rag is not None and res.get("rag"):
+                    r, ranks, top_k = res["rag"], res["rag"].get("needle_rank") or {}, rag["top_k"]
+                    rs = rag_stats[length]
+                    rs["n"] += 1
+                    rs["chunks"] += r["n_chunks"]
+                    rs["context_tokens"] += r["context_tokens"]
+                    for name in ("hybrid", "bm25", "dense"):
+                        rs[name] += ranks.get(name) is not None and ranks[name] <= top_k
+                    rs["no_needle"] += ranks.get("hybrid") is None
+                    if r["needle_retrieved"]:
+                        rs["found"] += 1
+                        rs["retrieved_correct"] += res["metric"]
+                    else:
+                        rs["missed_correct"] += res["metric"]
+                    embedding = r.get("embedding") or {}
+                    rs["embedding_tokens"] += embedding.get("tokens") or 0
+                    rs["embedding_costs"].append(embedding.get("cost"))
             if "model_config" in data:
                 configs[json.dumps(data["model_config"], sort_keys=True)] = data["model_config"]
             else:
@@ -191,6 +231,9 @@ def summarize_runs(loaded: list) -> dict:
             "configs": list(configs.values()),
             "files_without_config": files_without_config,
             "repeated_files": repeated_files,
+            "rag": next((r for r in rag_settings.values() if r is not None), None),
+            "rag_stats": dict(sorted(rag_stats.items())),
+            "n_rag_settings": len(rag_settings),
         }
     return summaries
 
@@ -310,9 +353,20 @@ def build_report(summaries: dict, models: dict, results_dirs: list) -> str:
             lines += [f"- **Model config:** {settings}"]
         elif s["configs"]:
             lines += [f"- **Model config:** {len(s['configs'])} different configs (see warnings and the full configs below)"]
+        if s["rag"] is not None:
+            rag = s["rag"]
+            settings = [f"`{k}` = {rag[k]}" for k in ("chunk_size", "chunk_overlap", "top_k")]
+            settings.append(f"`embedding_model` = `{rag['embedding_model']}`")
+            settings.append("`retriever` = `" + ", ".join(f"{k}={v}" for k, v in rag["retriever"].items()) + "`")
+            lines += [f"- **RAG:** {', '.join(settings)}"]
         lines += [""]
 
         warnings = []
+        if s["n_rag_settings"] > 1:
+            warnings.append(f"Results mix {s['n_rag_settings']} different RAG settings (no RAG counts as one); their scores are averaged together.")
+        no_needle = sum(rs["no_needle"] for rs in s["rag_stats"].values())
+        if no_needle:
+            warnings.append(f"{no_needle} request(s): the needle was not found whole in any chunk, so retrieval counts it as missed.")
         if s["repeated_files"]:
             warnings.append(f"{s['repeated_files']} result file(s) repeat a model, test, haystack and context length already in this run "
                             "(e.g. timestamped files from before re-runs overwrote results), so those requests are counted more than once. "
@@ -348,6 +402,24 @@ def build_report(summaries: dict, models: dict, results_dirs: list) -> str:
                 format_cost(sum_or_none(stats["current_cost"])), format_cost(sum_or_none(stats["cost"])),
             ])
         lines += md_table(header, rows) + [""]
+
+        if s["rag_stats"]:
+            lines += ["### Retrieval", "",
+                      "Share (%) of requests whose needle chunk is in the top `top_k` chunks by hybrid rank, by BM25 rank alone and by dense rank alone. "
+                      "Score is accuracy (%) on the requests whose needle was retrieved (hybrid) and on those where it was missed.", ""]
+            header = ["Context length", "Chunks", "Context tokens", "Needle retrieved", "BM25 alone", "Dense alone",
+                      "Score if retrieved", "Score if missed", "Embedding tokens sent", "Embedding cost"]
+            rows = []
+            for length, rs in s["rag_stats"].items():
+                n, missed = rs["n"], rs["n"] - rs["found"]
+                rows.append([
+                    format_length(length), f"{rs['chunks'] / n:.1f}", f"{rs['context_tokens'] / n:.0f}",
+                    pct(rs["hybrid"] / n), pct(rs["bm25"] / n), pct(rs["dense"] / n),
+                    pct(rs["retrieved_correct"] / rs["found"]) if rs["found"] else "--",
+                    pct(rs["missed_correct"] / missed) if missed else "--",
+                    f"{rs['embedding_tokens']:,}", format_cost(sum_or_none(rs["embedding_costs"])),
+                ])
+            lines += md_table(header, rows) + [""]
 
         lines += ["### Per test", "", "Accuracy (%) of each question-needle test, over its haystacks and depths.", ""]
         header = ["Test"] + [format_length(length) for length in s["lengths"]]

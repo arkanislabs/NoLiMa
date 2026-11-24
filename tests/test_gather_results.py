@@ -57,3 +57,45 @@ def test_report_warns_about_repeated_result_files():
     assert "1 result file(s) repeat a model, test, haystack and context length already in this run" in report
     single = [("new.json", result_data())]
     assert "repeat a model, test, haystack" not in build_report(summarize_runs(single), summarize_models(single), ["results"])
+
+
+def rag_data():
+    data = result_data()
+    data["rag"] = {"chunk_size": 1000, "chunk_overlap": 200, "top_k": 3, "embedding_model": "e",
+                   "retriever": {"lexical": "bm25", "bm25_k1": 1.2, "bm25_b": 0.75, "rrf_k": 60},
+                   "embedding_config": {"model": "openai/text-embedding-3-small"}}
+    ranks = [(1, 2, 1), (4, 1, 6), (None, None, None)]   # (hybrid, bm25, dense); the last needle was in no chunk
+    for r, (hybrid, bm25, dense) in zip(data["results"], ranks):
+        r["rag"] = {"n_chunks": 10, "context_tokens": 2400, "retrieved": [0, 1, 2], "needle_chunks": [],
+                    "needle_retrieved": hybrid is not None and hybrid <= 3,
+                    "needle_rank": {"hybrid": hybrid, "bm25": bm25, "dense": dense},
+                    "embedding": {"texts_sent": 11, "cache_hits": 0, "tokens": 11000, "cost": 0.00022}}
+    data["results"][1]["metric"] = 0
+    return data
+
+
+def test_summarized_result_flattens_rag_settings():
+    s = get_summarized_result(rag_data())
+    assert s["rag.top_k"] == 3 and s["rag.embedding_model"] == "e" and s["n_needle_retrieved"] == 1
+    assert s["rag.retriever"]["lexical"] == "bm25"
+    assert s["embedding_tokens"] == 33000 and s["embedding_cost"] == pytest.approx(0.00066)
+    assert "n_needle_retrieved" not in get_summarized_result(result_data())
+
+
+def test_report_shows_retrieval_table_and_warnings():
+    loaded = [("x.json", rag_data())]
+    report = build_report(summarize_runs(loaded), summarize_models(loaded), ["results"])
+    assert ("- **RAG:** `chunk_size` = 1000, `chunk_overlap` = 200, `top_k` = 3, `embedding_model` = `e`, "
+            "`retriever` = `lexical=bm25, bm25_k1=1.2, bm25_b=0.75, rrf_k=60`") in report
+    assert ("| Context length | Chunks | Context tokens | Needle retrieved | BM25 alone | Dense alone "
+            "| Score if retrieved | Score if missed | Embedding tokens sent | Embedding cost |") in report
+    assert "| 1K | 10.0 | 2400 | 33.3 | 66.7 | 33.3 | 100.0 | 50.0 | 33,000 | $0.0007 |" in report
+    assert "1 request(s): the needle was not found whole in any chunk, so retrieval counts it as missed." in report
+    plain = [("x.json", result_data())]
+    assert "### Retrieval" not in build_report(summarize_runs(plain), summarize_models(plain), ["results"])
+
+
+def test_report_warns_when_a_run_mixes_rag_settings():
+    loaded = [("a.json", result_data()), ("b.json", rag_data())]
+    report = build_report(summarize_runs(loaded), summarize_models(loaded), ["results"])
+    assert "Results mix 2 different RAG settings (no RAG counts as one); their scores are averaged together." in report
