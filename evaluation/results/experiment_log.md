@@ -27,6 +27,58 @@ Notes:
 - **Cost:**
 -->
 
+## 2026-11-25: A RAG baseline for DeepSeek V4.1 Flash
+
+**Research question:** Is RAG a good baseline for long-context problems in the NoLiMa dataset?
+
+**Short answer:** No.
+
+**TL;DR:** We put a simple RAG in front of DeepSeek V4.1 Flash (thinking off) and tried three retrievers. All three do worse than giving the model the whole haystack once the haystack no longer fits in the retrieved chunks (4K and up). At 32K the best RAG scores 28 vs 74 for the full context. Retrieval is what fails: when the needle's chunk is retrieved, the model answers about 90% of questions correctly at every length, but even the best retriever finds it only 31% of the time at 32K. We keep **hybrid RAG** as our baseline.
+
+### Full context vs three RAG variants
+
+| Run | Effective length | Base score (×0.85: Thr.) | 250 | 500 | 1K | 2K | 4K | 8K | 16K | 32K | Total cost |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Full context (no RAG) | 8K | 97.1 (82.5) | <ins>95.6</ins> | <ins>94.9</ins> | <ins>93.9</ins> | <ins>93.2</ins> | <ins>89.6</ins> | <ins>85.0</ins> | 80.2 | 74.4 | \$12.90 |
+| RAG, BM25 | 2K | 97.1 (82.5) | <ins>95.6</ins> | <ins>94.9</ins> | <ins>93.9</ins> | <ins>93.2</ins> | 59.9 | *32.0* | *16.9* | *9.5* | \$2.54 |
+| RAG, dense | 2K | 97.1 (82.5) | <ins>95.6</ins> | <ins>94.9</ins> | <ins>93.9</ins> | <ins>93.2</ins> | 77.7 | 57.0 | *38.0* | *28.2* | \$4.68 |
+| **RAG, hybrid (our baseline)** | 2K | 97.1 (82.5) | <ins>95.6</ins> | <ins>94.9</ins> | <ins>93.9</ins> | <ins>93.2</ins> | 77.7 | 56.8 | *37.7* | *27.4* | \$4.71 |
+
+Share of requests whose needle chunk was retrieved (top 3):
+
+| Retriever | 4K | 8K | 16K | 32K |
+|:---|:---:|:---:|:---:|:---:|
+| BM25 | 65.8 | 35.0 | 18.5 | 10.2 |
+| Dense | 84.7 | 63.2 | 42.9 | 31.0 |
+| Hybrid | 84.7 | 63.0 | 42.5 | 30.2 |
+
+### The three RAG variants
+
+All three cut the haystack into chunks of 1,000 tokens (200 overlapping) and give the model only the 3 best chunks, about 2.6K-2.9K tokens. They differ only in how "best" is decided:
+
+- **BM25:** keyword search. Picks the chunks that share the most (rare) words with the question.
+- **Dense:** meaning search. Turns the question and each chunk into an embedding (`text-embedding-3-small`) and picks the chunks closest in meaning.
+- **Hybrid:** runs both searches and merges the two rankings (reciprocal rank fusion, k=60).
+
+**Note: the purpose was to build a simple baseline, not to solve this task.** NoLiMa is built on purpose so that the needle and the question share almost no words, which makes lexical matching hard. A RAG doing poorly here is expected and says little about RAG in general.
+
+Notes:
+
+- **Up to 2K, RAG is the full-context run.** The haystack is at most 3 chunks, so all of it is retrieved and the requests are identical. That is also why every RAG run gets an effective length of 2K: it says nothing about retrieval.
+- **Retrieval is the bottleneck, not the model.** When the needle chunk is retrieved, the model answers about 90% correctly at every length. When it is missed, it scores 0.
+- **BM25 is no better than chance.** Its hit rates (66 / 35 / 19 / 10) are about what picking 3 chunks at random gives. This is NoLiMa's design at work.
+- **Hybrid ≈ dense.** BM25 adds nothing here, so hybrid follows the dense ranking. We still pick hybrid as the baseline: it is the standard simple RAG setup and does not depend on this benchmark's quirks. That hybrid is barely worse than dense even here, where BM25 is useless, shows that simple rank fusion of BM25 and dense is robust enough: a weak retriever does not drag the merged ranking down.
+- **RAG is cheap.** The model always reads under 3K tokens, so the cost does not grow with context length.
+
+### Reproduction details
+
+- **Runs:** `deepseek_v4.1_flash_1017_nothink_openrouter` (full context, see the 2026-11-24 entry), `..._rag_bm25_c1000_k3`, `..._rag_dense_c1000_k3`, `..._rag_c1000_k3` (hybrid)
+- **Commit:** `509f3bf` (hybrid), `c11f881` (BM25, dense)
+- **Model / provider:** `deepseek/deepseek-v4.1-flash-1017` via OpenRouter, restricted to Cloudflare, reasoning off. Embeddings: `openai/text-embedding-3-small` via OpenRouter, restricted to OpenAI.
+- **Config:** the paper's settings (greedy decoding, `max_tokens` 192). RAG: `chunk_size` 1000, `chunk_overlap` 200, `top_k` 3. BM25 `k1` 1.2, `b` 0.75; cosine similarity for dense.
+- **Context lengths:** 250-32K. Each length has 7,540 requests.
+- **Cost:** the totals above price every request as if each run had been made alone. **The request and embedding caches are shared between runs, so the actual spend was smaller.** The RAG requests at 250-2K are identical to the full-context run's and were answered from its cache (\$1.23 of each RAG total), and hybrid and dense mostly retrieve the same chunks, so most of their requests were shared too. The result files record \$0.12 of embedding cost.
+
 ## 2026-11-24: DeepSeek V4.1 Flash vs the paper's models
 
 **Research question:** Has the needle moved?
