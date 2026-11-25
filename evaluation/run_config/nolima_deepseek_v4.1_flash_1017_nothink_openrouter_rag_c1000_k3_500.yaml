@@ -19,3 +19,4 @@ rag:
   chunk_overlap: 200
   top_k: 3
   embedding_model: text_embedding_3_small_openrouter
+  method: hybrid

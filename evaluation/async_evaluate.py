@@ -21,7 +21,7 @@ from request_cache import RequestCache, DEFAULT_REQUEST_CACHE_DIR, cost_summary,
 from jsonargparse import ArgumentParser, ActionConfigFile
 from data.book_haystack import BookHaystack
 from embeddings import DEFAULT_EMBEDDING_CACHE_DIR, Embedder, load_embedder
-from rag import RAGConfig, RETRIEVER, retrieve_context
+from rag import RAGConfig, RETRIEVERS, retrieve_context
 
 
 def result_file_name(model_name: str, test_name: str, haystack_path: str, context_length: int) -> str:
@@ -94,7 +94,8 @@ class NoLiMa_Tester:
         `haystack_path`, tokenized (if at all) with that connector's tokenizer.
         `rag`, when given, answers each request from the `top_k` chunks of its haystack that the retriever
         picks instead of the whole haystack; embeddings are cached in `embedding_cache_dir`. `embedder`, when given,
-        is reused instead of loaded, like `api_connector`; it must come from `rag.embedding_model`.
+        is reused instead of loaded, like `api_connector`; it must come from `rag.embedding_model`. A `bm25` run
+        loads no embedder.
         """
         self.model_name = model_name
         self.model_config_path = os.path.join(model_configs_dir, model_name + ".json")
@@ -164,7 +165,8 @@ class NoLiMa_Tester:
         self.distractor = distractor
         
         self.rag = rag
-        if rag is not None:
+        self.embedder = None
+        if rag is not None and rag.uses_embeddings:
             # Reused like `api_connector`: one embedding client (and its connection pool) for the whole run
             self.embedder = embedder or load_embedder(rag.embedding_model, model_configs_dir, embedding_cache_dir)
 
@@ -191,7 +193,8 @@ class NoLiMa_Tester:
 
     async def _generate_with_rag(self, text: str, question: str, needle: str) -> dict:
         context, info = await retrieve_context(
-            text, question, needle, self.rag, self.api_connector.encode, self.api_connector.decode, self.embedder.embed,
+            text, question, needle, self.rag, self.api_connector.encode, self.api_connector.decode,
+            self.embedder.embed if self.embedder is not None else None,
             encode_in_thread=self.api_connector.encode_in_thread
         )
         if self._on_retrieval is not None:
@@ -244,9 +247,10 @@ class NoLiMa_Tester:
         if self.distractor is not None:
             outputs["distractor"] = self.distractor
         if self.rag is not None:
-            # RETRIEVER is read here, not at import, so the file records the method that produced it
-            outputs["rag"] = {**dataclasses.asdict(self.rag), "retriever": dict(RETRIEVER),
-                              "embedding_config": self.embedder.logged_config}
+            # RETRIEVERS is read here, not at import, so the file records the method that produced it
+            outputs["rag"] = {**dataclasses.asdict(self.rag), "retriever": dict(RETRIEVERS[self.rag.method])}
+            if self.embedder is not None:
+                outputs["rag"]["embedding_config"] = self.embedder.logged_config
         # Logged so the report can show the settings the results were produced with
         outputs["model_config"] = self.logged_model_config
         results_path = os.path.join(self.results_dir, f"{self.eval_name}.json")

@@ -85,14 +85,40 @@ def test_summarized_result_flattens_rag_settings():
 def test_report_shows_retrieval_table_and_warnings():
     loaded = [("x.json", rag_data())]
     report = build_report(summarize_runs(loaded), summarize_models(loaded), ["results"])
-    assert ("- **RAG:** `chunk_size` = 1000, `chunk_overlap` = 200, `top_k` = 3, `embedding_model` = `e`, "
+    # a file from before `method` was logged counts as hybrid
+    assert ("- **RAG:** `method` = `hybrid`, `chunk_size` = 1000, `chunk_overlap` = 200, `top_k` = 3, `embedding_model` = `e`, "
             "`retriever` = `lexical=bm25, bm25_k1=1.2, bm25_b=0.75, rrf_k=60`") in report
-    assert ("| Context length | Chunks | Context tokens | Needle retrieved | BM25 alone | Dense alone "
+    assert ("| Context length | Chunks | Context tokens | Needle retrieved | Hybrid | BM25 alone | Dense alone "
             "| Score if retrieved | Score if missed | Embedding tokens sent | Embedding cost |") in report
-    assert "| 1K | 10.0 | 2400 | 33.3 | 66.7 | 33.3 | 100.0 | 50.0 | 33,000 | $0.0007 |" in report
+    assert "| 1K | 10.0 | 2400 | 33.3 | 33.3 | 66.7 | 33.3 | 100.0 | 50.0 | 33,000 | $0.0007 |" in report
     assert "1 request(s): the needle was not found whole in any chunk, so retrieval counts it as missed." in report
     plain = [("x.json", result_data())]
     assert "### Retrieval" not in build_report(summarize_runs(plain), summarize_models(plain), ["results"])
+
+
+def bm25_data():
+    data = rag_data()
+    data["rag"] = {"chunk_size": 1000, "chunk_overlap": 200, "top_k": 3, "embedding_model": None, "method": "bm25",
+                   "retriever": {"lexical": "bm25", "bm25_k1": 1.2, "bm25_b": 0.75}}
+    for r, bm25 in zip(data["results"], (2, 4, None)):
+        r["rag"].update(needle_retrieved=bm25 is not None and bm25 <= 3, needle_rank={"bm25": bm25},
+                        embedding={"texts_sent": 0, "cache_hits": 0, "tokens": 0, "cost": 0.0})
+    return data
+
+
+def test_report_of_a_bm25_run_shows_only_the_bm25_rank():
+    loaded = [("x.json", bm25_data())]
+    report = build_report(summarize_runs(loaded), summarize_models(loaded), ["results"])
+    assert "- **RAG:** `method` = `bm25`, `chunk_size` = 1000, `chunk_overlap` = 200, `top_k` = 3, `embedding_model` = none, " in report
+    assert "| 1K | 10.0 | 2400 | 33.3 | -- | 33.3 | -- | 100.0 | 50.0 | 0 | $0.0000 |" in report
+    assert "1 request(s): the needle was not found whole in any chunk" in report
+
+
+def test_old_and_new_hybrid_files_count_as_one_rag_setting():
+    new = rag_data()
+    new["rag"]["method"] = "hybrid"
+    loaded = [("a.json", rag_data()), ("b.json", new)]
+    assert next(iter(summarize_runs(loaded).values()))["n_rag_settings"] == 1
 
 
 def test_report_warns_when_a_run_mixes_rag_settings():

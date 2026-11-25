@@ -138,9 +138,9 @@ if __name__ == "__main__":
     label = f"{args.progress_label} CL{args.context_length}".strip()
     print(f"{label}: {args.model_name}, {len(selected_haystacks)} haystacks x {len(tests)} tests x "
           f"{args.document_depth_percent_intervals} depths = {n_runs * args.document_depth_percent_intervals} requests"
-          + (f" (RAG: top {args.rag.top_k} of {args.rag.chunk_size}-token chunks, overlap {args.rag.chunk_overlap})" if args.rag else ""))
+          + (f" (RAG {args.rag.method}: top {args.rag.top_k} of {args.rag.chunk_size}-token chunks, overlap {args.rag.chunk_overlap})" if args.rag else ""))
     progress = tqdm(total=n_runs * args.document_depth_percent_intervals, desc=label, unit="req", dynamic_ncols=True)
-    embeddings = EmbeddingTally() if args.rag else None
+    embeddings = EmbeddingTally() if args.rag and args.rag.uses_embeddings else None
     run_no = 0
     spent = 0.0
     all_results = []

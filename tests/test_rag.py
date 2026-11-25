@@ -34,7 +34,9 @@ def test_chunk_spans():
     assert chunk_spans(0, 1000, 200) == []
 
 
-@pytest.mark.parametrize("kwargs", [{"chunk_size": 0}, {"chunk_overlap": -1}, {"chunk_overlap": 1000}, {"top_k": 0}])
+@pytest.mark.parametrize("kwargs", [{"chunk_size": 0}, {"chunk_overlap": -1}, {"chunk_overlap": 1000}, {"top_k": 0},
+                                    {"method": "tfidf"}, {"method": "dense", "embedding_model": None},
+                                    {"method": "bm25"}])   # bm25 with the default embedding_model
 def test_rag_config_rejects_invalid_values(kwargs):
     with pytest.raises(ValueError):
         RAGConfig(**kwargs)
@@ -126,3 +128,37 @@ def test_encoding_in_a_thread_gives_the_same_result():
     threaded = asyncio.run(retrieve_context(text, QUESTION, NEEDLE, CONFIG, tracking_encode, decode, keyword_embed,
                                             encode_in_thread=True))
     assert threaded == retrieve(text) and threads[0] is not threading.main_thread()
+
+
+BM25 = RAGConfig(chunk_size=200, chunk_overlap=60, top_k=2, embedding_model=None, method="bm25")
+DENSE = RAGConfig(chunk_size=200, chunk_overlap=60, top_k=2, method="dense")
+
+
+async def must_not_embed(texts):
+    raise AssertionError("embed was called")
+
+
+def test_each_method_retrieves_by_its_own_ranking():
+    # BM25 matches "character" and "been" in the filler, dense matches only the Kiasma needle
+    text = "The character has been here.\n" + FILLER + NEEDLE + "\n" + FILLER + "Every character has been there.\n"
+    _, hybrid = retrieve(text)
+    _, dense = retrieve(text, DENSE)
+    _, bm25 = asyncio.run(retrieve_context(text, QUESTION, NEEDLE, BM25, encode, decode, None))
+    assert dense["needle_rank"] == hybrid["needle_rank"]   # all rankings are logged whichever method picks
+    assert dense["needle_rank"]["dense"] == 1 and dense["needle_retrieved"] is True
+    assert dense["retrieved"][0] in dense["needle_chunks"]
+    assert bm25["needle_rank"]["bm25"] > 2 and bm25["needle_retrieved"] is False
+    assert not set(bm25["retrieved"]) & set(bm25["needle_chunks"])
+
+
+def test_bm25_never_embeds_and_logs_only_its_rank():
+    text = FILLER + NEEDLE + "\n" + FILLER
+    context, info = asyncio.run(retrieve_context(text, QUESTION, NEEDLE, BM25, encode, decode, must_not_embed))
+    assert info["ranked"] is True and set(info["needle_rank"]) == {"bm25"}
+    assert info["embedding"] == {"texts_sent": 0, "cache_hits": 0, "tokens": 0, "cost": 0.0}
+    assert len(info["retrieved"]) == 2 and info["context_tokens"] <= 2 * 200
+
+
+def test_dense_without_bm25_signal_matches_hybrid():
+    text = FILLER + NEEDLE + "\n" + FILLER   # no question word in any chunk
+    assert retrieve(text, DENSE)[0] == retrieve(text)[0]

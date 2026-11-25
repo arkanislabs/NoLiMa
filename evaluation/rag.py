@@ -1,15 +1,16 @@
 """
-Hybrid retriever for the RAG baseline: BM25 and dense embeddings fused with Reciprocal Rank Fusion.
+Retriever for the RAG baseline: BM25 and dense embeddings, alone or fused with Reciprocal Rank Fusion.
 
 A haystack is cut into overlapping windows of generator tokens. The windows are ranked against
-the question by BM25 and by embedding cosine similarity, and the fused top-k windows become
-the context the generator sees. The retriever never learns where the needle is; the needle is
+the question by BM25 and by embedding cosine similarity, and the top-k windows of the configured
+`method` become the context the generator sees: `hybrid` (both, fused), `bm25` (lexical only, no
+embeddings) or `dense` (embeddings only). The retriever never learns where the needle is; the needle is
 only used afterwards, to log where it ranked.
 """
 import asyncio
 import math
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 from sklearn.feature_extraction.text import CountVectorizer
@@ -18,8 +19,12 @@ RRF_K = 60
 BM25_K1 = 1.2
 BM25_B = 0.75
 CHUNK_SEPARATOR = "\n\n[...]\n\n"
-# The retrieval method as written to result files; change it together with the method.
-RETRIEVER = {"lexical": "bm25", "bm25_k1": BM25_K1, "bm25_b": BM25_B, "rrf_k": RRF_K}
+# Each method's scorers and constants as written to result files; change them together with the method.
+RETRIEVERS = {
+    "hybrid": {"lexical": "bm25", "bm25_k1": BM25_K1, "bm25_b": BM25_B, "rrf_k": RRF_K},
+    "bm25": {"lexical": "bm25", "bm25_k1": BM25_K1, "bm25_b": BM25_B},
+    "dense": {"similarity": "cosine"},
+}
 
 
 @dataclass(frozen=True)
@@ -27,9 +32,20 @@ class RAGConfig:
     chunk_size: int = 1000
     chunk_overlap: int = 200
     top_k: int = 3
-    embedding_model: str = "text_embedding_3_small_openrouter"
+    embedding_model: Optional[str] = "text_embedding_3_small_openrouter"
+    method: str = "hybrid"
+
+    @property
+    def uses_embeddings(self) -> bool:
+        return self.method != "bm25"
 
     def __post_init__(self):
+        if self.method not in RETRIEVERS:
+            raise ValueError(f"method must be one of {', '.join(RETRIEVERS)}, got {self.method!r}")
+        if self.uses_embeddings and not self.embedding_model:
+            raise ValueError(f"method {self.method!r} needs an embedding_model")
+        if not self.uses_embeddings and self.embedding_model is not None:
+            raise ValueError("method 'bm25' uses no embeddings: set embedding_model to null")
         if self.chunk_size < 1:
             raise ValueError(f"chunk_size must be >= 1, got {self.chunk_size}")
         if not 0 <= self.chunk_overlap < self.chunk_size:
@@ -118,10 +134,11 @@ def _chunk(text: str, config: RAGConfig, encode: Callable, decode: Callable) -> 
 
 
 async def retrieve_context(text: str, question: str, needle: str, config: RAGConfig,
-                           encode: Callable, decode: Callable, embed: Callable,
+                           encode: Callable, decode: Callable, embed: Optional[Callable],
                            encode_in_thread: bool = False) -> tuple[str, dict]:
     """
-    Return the top-k hybrid-ranked chunks of `text` as context, and a log of the retrieval. With `encode_in_thread`,
+    Return the top-k chunks of `text` by `config.method` as context, and a log of the retrieval. `embed` is never
+    called for `bm25` (pass None), and the log then has no hybrid or dense rank. With `encode_in_thread`,
     tokenizing and chunking run in a worker thread, so that concurrent requests tokenize in parallel; only pass it
     for a thread-safe tokenizer that releases the GIL (`APIConnector.encode_in_thread`).
     """
@@ -130,19 +147,27 @@ async def retrieve_context(text: str, question: str, needle: str, config: RAGCon
     else:
         tokens, spans, chunks = _chunk(text, config, encode, decode)
     ranked = len(chunks) > config.top_k
+    usage = {"texts_sent": 0, "cache_hits": 0, "tokens": 0, "cost": 0.0}
     if ranked:
-        vectors, usage = await embed([question] + chunks)
-        vectors = np.asarray(vectors, dtype=float)
         bm25 = bm25_scores(question, chunks)
-        dense = _cosine(vectors[0], vectors[1:])
+        dense = None
+        if config.uses_embeddings:
+            vectors, usage = await embed([question] + chunks)
+            vectors = np.asarray(vectors, dtype=float)
+            dense = _cosine(vectors[0], vectors[1:])
     else:
         # Every chunk is retrieved whatever the scores: skip the embedding request. Ranks are chunk positions,
         # all within top_k, so the needle counts as retrieved under every ranking, as it would after scoring.
-        usage = {"texts_sent": 0, "cache_hits": 0, "tokens": 0, "cost": 0.0}
-        bm25 = dense = np.zeros(len(chunks))
-    hybrid = ordinal_ranks(rrf_scores(tied_ranks(bm25), tied_ranks(dense)))
+        bm25 = np.zeros(len(chunks))
+        dense = bm25 if config.uses_embeddings else None
+    rankings = {}
+    if dense is not None:
+        rankings["hybrid"] = ordinal_ranks(rrf_scores(tied_ranks(bm25), tied_ranks(dense)))
+    rankings["bm25"] = ordinal_ranks(bm25)
+    if dense is not None:
+        rankings["dense"] = ordinal_ranks(dense)
 
-    retrieved = [int(i) for i in np.argsort(hybrid)[:config.top_k]]
+    retrieved = [int(i) for i in np.argsort(rankings[config.method])[:config.top_k]]
     merged = merge_spans([spans[i] for i in retrieved])
     if merged == [(0, len(tokens))]:
         context = text
@@ -150,7 +175,6 @@ async def retrieve_context(text: str, question: str, needle: str, config: RAGCon
         context = CHUNK_SEPARATOR.join(decode(tokens[a:b]) for a, b in merged)
 
     needle_chunks = [i for i, chunk in enumerate(chunks) if needle in chunk]
-    rankings = {"hybrid": hybrid, "bm25": ordinal_ranks(bm25), "dense": ordinal_ranks(dense)}
     needle_rank = {name: int(min(r[needle_chunks])) if needle_chunks else None for name, r in rankings.items()}
     info = {
         "n_chunks": len(chunks),
@@ -158,7 +182,7 @@ async def retrieve_context(text: str, question: str, needle: str, config: RAGCon
         "retrieved": retrieved,
         "needle_chunks": needle_chunks,
         "needle_rank": needle_rank,
-        "needle_retrieved": needle_rank["hybrid"] is not None and needle_rank["hybrid"] <= config.top_k,
+        "needle_retrieved": needle_rank[config.method] is not None and needle_rank[config.method] <= config.top_k,
         "context_tokens": sum(b - a for a, b in merged),
         "embedding": usage,
     }

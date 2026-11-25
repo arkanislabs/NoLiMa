@@ -20,7 +20,7 @@ Report: per run (a parent_results_dir such as results/<run>/CL1K/), the score at
 each context length, base score, threshold and effective length as defined in
 the NoLiMa paper, plus per-test scores, cut-offs, current and total cost and the
 model config, and, for RAG runs, the RAG settings and a retrieval table (needle
-retrieval rate by hybrid, BM25 and dense rank, score on retrieved and missed requests, embedding
+retrieval rate by the run's method and by hybrid, BM25 and dense rank, score on retrieved and missed requests, embedding
 tokens and cost), and a warning when a run holds more than one file for the same
 test, haystack and context length (those requests would be counted twice).
 
@@ -54,6 +54,7 @@ BASE_LENGTHS = (250, 500, 1000)   # base score: best of these per test, averaged
 THRESHOLD_RATIO = 0.85            # effective length: largest length scoring >= 85% of base
 LOW_RATIO = 0.5                   # scores below 50% of base are italicized
 FULL_RUN_REQUESTS = 5 * 58 * 26   # requests per context length in a full run (haystacks x tests x depths)
+RANKINGS = ("hybrid", "bm25", "dense")   # the needle ranks a RAG result can log
 
 
 # ---------------------------------------------------------------- loading
@@ -151,7 +152,7 @@ def summarize_runs(loaded: list) -> dict:
     for run, files in sorted(by_run.items()):
         length_stats = defaultdict(lambda: {"n": 0, "correct": 0, "cutoff": 0, "cache_hits": 0, "cost": [], "current_cost": [],
                                             "reasoning": [], "haystacks": set(), "tests": set()})
-        rag_stats = defaultdict(lambda: {"n": 0, "chunks": 0, "context_tokens": 0, "hybrid": 0, "bm25": 0, "dense": 0,
+        rag_stats = defaultdict(lambda: {"n": 0, "chunks": 0, "context_tokens": 0, **{name + suffix: 0 for name in RANKINGS for suffix in ("", "_n")},
                                          "found": 0, "retrieved_correct": 0, "missed_correct": 0, "no_needle": 0,
                                          "embedding_tokens": 0, "embedding_costs": []})
         rag_settings = {}
@@ -163,6 +164,8 @@ def summarize_runs(loaded: list) -> dict:
             length = data["context_length"]
             stats = length_stats[length]
             rag = data.get("rag")
+            if rag is not None and "method" not in rag:
+                rag = {**rag, "method": "hybrid"}   # files from before the method was configurable
             rag_settings[json.dumps(rag, sort_keys=True)] = rag
             rag_files += rag is not None
             stats["haystacks"].add(os.path.basename(data.get("haystack_path", "")))
@@ -182,9 +185,11 @@ def summarize_runs(loaded: list) -> dict:
                     rs["n"] += 1
                     rs["chunks"] += r["n_chunks"]
                     rs["context_tokens"] += r["context_tokens"]
-                    for name in ("hybrid", "bm25", "dense"):
-                        rs[name] += ranks.get(name) is not None and ranks[name] <= top_k
-                    rs["no_needle"] += ranks.get("hybrid") is None
+                    for name in RANKINGS:
+                        if name in ranks:   # a bm25 run has no hybrid or dense rank
+                            rs[name + "_n"] += 1
+                            rs[name] += ranks[name] is not None and ranks[name] <= top_k
+                    rs["no_needle"] += all(rank is None for rank in ranks.values())
                     if r["needle_retrieved"]:
                         rs["found"] += 1
                         rs["retrieved_correct"] += res["metric"]
@@ -355,8 +360,8 @@ def build_report(summaries: dict, models: dict, results_dirs: list) -> str:
             lines += [f"- **Model config:** {len(s['configs'])} different configs (see warnings and the full configs below)"]
         if s["rag"] is not None:
             rag = s["rag"]
-            settings = [f"`{k}` = {rag[k]}" for k in ("chunk_size", "chunk_overlap", "top_k")]
-            settings.append(f"`embedding_model` = `{rag['embedding_model']}`")
+            settings = [f"`method` = `{rag['method']}`"] + [f"`{k}` = {rag[k]}" for k in ("chunk_size", "chunk_overlap", "top_k")]
+            settings.append(f"`embedding_model` = `{rag['embedding_model']}`" if rag["embedding_model"] else "`embedding_model` = none")
             settings.append("`retriever` = `" + ", ".join(f"{k}={v}" for k, v in rag["retriever"].items()) + "`")
             lines += [f"- **RAG:** {', '.join(settings)}"]
         lines += [""]
@@ -405,20 +410,23 @@ def build_report(summaries: dict, models: dict, results_dirs: list) -> str:
 
         if s["rag_stats"]:
             lines += ["### Retrieval", "",
-                      "Share (%) of requests whose needle chunk is in the top `top_k` chunks by hybrid rank, by BM25 rank alone and by dense rank alone. "
-                      "Score is accuracy (%) on the requests whose needle was retrieved (hybrid) and on those where it was missed. "
+                      "Needle retrieved is the share (%) of requests whose needle chunk was among the `top_k` chunks the run's `method` retrieved; "
+                      "Hybrid, BM25 alone and Dense alone are the same share by each ranking, whichever method picked the context "
+                      "(-- where the run did not compute it: a `bm25` run embeds nothing). "
+                      "Score is accuracy (%) on the requests whose needle was retrieved and on those where it was missed. "
                       "BM25 and dense use ordinal ranks that break ties by chunk position, so when every BM25 score is 0, BM25 alone counts a hit "
                       "exactly when the needle is in the first `top_k` chunks (chance level over uniform depths). "
                       "Embedding tokens and cost are what each result file recorded when it was written: texts served from the embedding cache count 0, "
                       "so a re-run shows 0 and $0.", ""]
-            header = ["Context length", "Chunks", "Context tokens", "Needle retrieved", "BM25 alone", "Dense alone",
+            header = ["Context length", "Chunks", "Context tokens", "Needle retrieved", "Hybrid", "BM25 alone", "Dense alone",
                       "Score if retrieved", "Score if missed", "Embedding tokens sent", "Embedding cost"]
             rows = []
             for length, rs in s["rag_stats"].items():
                 n, missed = rs["n"], rs["n"] - rs["found"]
                 rows.append([
                     format_length(length), f"{rs['chunks'] / n:.1f}", f"{rs['context_tokens'] / n:.0f}",
-                    pct(rs["hybrid"] / n), pct(rs["bm25"] / n), pct(rs["dense"] / n),
+                    pct(rs["found"] / n),
+                    *(pct(rs[name] / rs[name + "_n"]) if rs[name + "_n"] else "--" for name in RANKINGS),
                     pct(rs["retrieved_correct"] / rs["found"]) if rs["found"] else "--",
                     pct(rs["missed_correct"] / missed) if missed else "--",
                     f"{rs['embedding_tokens']:,}", format_cost(sum_or_none(rs["embedding_costs"])),
