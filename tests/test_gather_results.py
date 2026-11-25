@@ -44,6 +44,15 @@ def test_report_shows_current_and_total_cost():
     assert "| Cut off | Avg reasoning tokens | Current cost | Total cost |" in report
 
 
+def test_summary_shows_total_cost_per_run_and_cache_note():
+    loaded = [("x.json", result_data())]
+    report = build_report(summarize_runs(loaded), summarize_models(loaded), ["results"])
+    summary = report.split("## Summary")[1].split("## Cost by model")[0]
+    assert "| Total cost (USD) |" in summary
+    assert "| $0.0070 |" in summary
+    assert "**Total cost counts every request" in summary and "the actual cost might be lower.**" in summary
+
+
 def test_summarized_result_drops_seed_without_test_hash():
     data = result_data()
     del data["test_hash"]
