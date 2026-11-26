@@ -15,10 +15,46 @@ from copy import copy
 from jsonargparse import ArgumentParser, ActionConfigFile
 
 from async_evaluate import NoLiMa_Tester
+from embeddings import DEFAULT_EMBEDDING_CACHE_DIR
+from rag import RAGConfig
 from request_cache import DEFAULT_REQUEST_CACHE_DIR, cost_summary, current_cost
 from data.book_haystack import BookHaystack
 
 DEFAULT_TASK_TEMPLATE = "You will answer a question based on the following book snippet:\n\n{haystack}\n\nUse the information provided in the book snippet to answer the question. Your answer should be short and based on either explicitly stated facts or strong, logical inferences.\n\nQuestion: {question}\n\n Return only the final answer with no additional explanation or reasoning."
+
+class EmbeddingTally:
+    """Embedding usage of a RAG run so far: tokens sent and their cost, cache hits, requests that needed no embedding."""
+
+    def __init__(self):
+        self.tokens = self.cache_hits = self.embedded = self.skipped = 0
+        self.cost = 0.0
+        self.cost_unknown = False
+
+    def add(self, info: dict) -> None:
+        """Count one request's retrieval log (the `rag` entry of a result)."""
+        usage = info["embedding"]
+        self.tokens += usage["tokens"]
+        self.cache_hits += usage["cache_hits"]
+        self.embedded += info["ranked"]
+        self.skipped += not info["ranked"]
+        if usage["cost"] is None:
+            self.cost_unknown = self.cost_unknown or usage["texts_sent"] > 0
+        else:
+            self.cost += usage["cost"]
+
+    def _cost(self) -> str:
+        return f"${self.cost:.4f}" + (" + unreported" if self.cost_unknown else "")
+
+    def postfix(self) -> str:
+        """For the progress bar: empty until some request needed embeddings."""
+        return f" | embeddings {self._cost()} ({self.tokens:,} tokens)" if self.embedded else ""
+
+    def summary(self) -> str:
+        if not self.embedded:
+            return f"none needed (every chunk retrieved in all {self.skipped:,} requests)"
+        return (f"{self.tokens:,} tokens sent, cost {self._cost()}, {self.cache_hits:,} texts from the embedding cache"
+                + (f", {self.skipped:,} requests not embedded (every chunk retrieved)" if self.skipped else ""))
+
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="NoLiMa Multi-setup Tester")
@@ -43,9 +79,11 @@ if __name__ == "__main__":
     parser.add_argument("--haystack_files", type=Optional[List[str]], default=None, help="Run only these files from haystack_dir (e.g. rand_book_1.txt); default runs all")
     parser.add_argument("--request_cache_dir", type=str, default=DEFAULT_REQUEST_CACHE_DIR, help="Directory of the LLM request cache, shared by all runs")
     parser.add_argument("--use_request_cache", type=bool, default=True, help="Answer identical requests from the request cache instead of the API")
+    parser.add_argument("--rag", type=Optional[RAGConfig], default=None, help="RAG baseline: answer from the top_k retrieved chunks of the haystack instead of the whole haystack")
+    parser.add_argument("--embedding_cache_dir", type=str, default=DEFAULT_EMBEDDING_CACHE_DIR, help="Directory of the embedding cache, shared by all runs")
     parser.add_argument("--progress_label", type=str, default="", help="Prefix for the progress bar, e.g. the stage of a multi-run script ([2/5])")
 
-    args = parser.parse_args()
+    args = parser.instantiate_classes(parser.parse_args())
 
     with open(args.needle_set_path, "r") as file:
         needle_set = json.load(file)
@@ -99,14 +137,17 @@ if __name__ == "__main__":
     n_runs = len(selected_haystacks) * len(tests)
     label = f"{args.progress_label} CL{args.context_length}".strip()
     print(f"{label}: {args.model_name}, {len(selected_haystacks)} haystacks x {len(tests)} tests x "
-          f"{args.document_depth_percent_intervals} depths = {n_runs * args.document_depth_percent_intervals} requests")
+          f"{args.document_depth_percent_intervals} depths = {n_runs * args.document_depth_percent_intervals} requests"
+          + (f" (RAG {args.rag.method}: top {args.rag.top_k} of {args.rag.chunk_size}-token chunks, overlap {args.rag.chunk_overlap})" if args.rag else ""))
     progress = tqdm(total=n_runs * args.document_depth_percent_intervals, desc=label, unit="req", dynamic_ncols=True)
+    embeddings = EmbeddingTally() if args.rag and args.rag.uses_embeddings else None
     run_no = 0
     spent = 0.0
     all_results = []
     # Built by the first test and reused by the rest: reloading the tokenizer and re-tokenizing each book
     # for every test took most of the time of a run whose requests were all cached
     api_connector = None
+    embedder = None
     for haystack_no, haystack in enumerate(haystacks):
         # Filter inside the loop so haystack_no, and therefore the seed, matches a full run
         if haystack not in selected_haystacks:
@@ -117,7 +158,8 @@ if __name__ == "__main__":
 
         for test in tests:
             run_no += 1
-            progress.set_postfix_str(f"test {run_no}/{n_runs} {haystack_name} {test['test_name']} | spent ${spent:.4f}")
+            progress.set_postfix_str(f"test {run_no}/{n_runs} {haystack_name} {test['test_name']} | spent ${spent:.4f}"
+                                  + (embeddings.postfix() if embeddings is not None else ""))
             tester = NoLiMa_Tester(
                 model_name=args.model_name,
                 model_configs_dir=args.model_configs_dir,
@@ -144,14 +186,21 @@ if __name__ == "__main__":
                 request_cache_dir=args.request_cache_dir,
                 use_request_cache=args.use_request_cache,
                 api_connector=api_connector,
-                haystack=book
+                haystack=book,
+                rag=args.rag,
+                embedding_cache_dir=args.embedding_cache_dir,
+                embedder=embedder
             )
             api_connector = tester.api_connector
+            embedder = getattr(tester, "embedder", None)
 
-            results = tester.evaluate(progress=progress)
+            results = tester.evaluate(progress=progress,
+                                      on_retrieval=embeddings.add if embeddings is not None else None)
             spent += sum(c for c in map(current_cost, results) if c is not None)
             all_results += results
     progress.close()
 
     print(f"{label} done. {cost_summary(all_results)}")
+    if embeddings is not None:
+        print(f"{label} embeddings: {embeddings.summary()}")
 

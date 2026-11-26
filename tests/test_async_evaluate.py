@@ -1,13 +1,16 @@
 import asyncio
 import json
 
+import numpy as np
 import pytest
 
 import async_api_connector
+import async_evaluate
 from async_api_connector import APIConnector
 from async_evaluate import NoLiMa_Tester, result_file_name
 from conftest import CharTokenizer
 from data.book_haystack import BookHaystack
+from rag import RETRIEVERS, RAGConfig
 
 MODEL_CONFIG = {
     "model": "test/model",
@@ -191,3 +194,88 @@ def test_overwriting_results_from_other_settings_warns(make_tester, sent, tmp_pa
     make_tester(str(tmp_path / "run"), needle="Actually, {CHAR} has seen the Kiasma museum.").evaluate()
     out = capsys.readouterr().out
     assert "Warning: overwriting" in out and "produced with different settings: needle." in out
+
+
+class KiasmaEmbedder:
+    logged_config = {"model": "fake/embedding"}
+
+    async def embed(self, texts):
+        vectors = np.array([[float("Kiasma" in t or "Helsinki" in t), 0.1] for t in texts])
+        return vectors, {"texts_sent": len(texts), "cache_hits": 0, "tokens": 10 * len(texts), "cost": None}
+
+
+@pytest.fixture
+def fake_embedder(monkeypatch):
+    monkeypatch.setattr(async_evaluate, "load_embedder", lambda *args, **kwargs: KiasmaEmbedder())
+
+
+SMALL_RAG = RAGConfig(chunk_size=100, chunk_overlap=60, top_k=1)
+
+
+def test_rag_prompts_hold_only_the_retrieved_chunks(make_tester, sent, fake_embedder, tmp_path):
+    results = make_tester(str(tmp_path / "run"), rag=SMALL_RAG).evaluate()
+    prompts = [request["messages"][-1]["content"] for request in sent]
+    assert len(prompts) == 3 and all("Kiasma" in p and len(p) < 200 for p in prompts)   # full haystack alone is 200+
+    assert all(r["rag"]["n_chunks"] > 1 and len(r["rag"]["retrieved"]) == 1 and r["rag"]["context_tokens"] <= 100
+               and r["rag"]["embedding"]["texts_sent"] == r["rag"]["n_chunks"] + 1 for r in results)
+    (result_file,) = (tmp_path / "run").iterdir()
+    saved = json.loads(result_file.read_text())
+    assert set(saved) == RESULT_KEYS | {"rag"}
+    assert saved["rag"] == {"chunk_size": 100, "chunk_overlap": 60, "top_k": 1,
+                            "embedding_model": "text_embedding_3_small_openrouter", "method": "hybrid",
+                            "retriever": {"lexical": "bm25", "bm25_k1": 1.2, "bm25_b": 0.75, "rrf_k": 60},
+                            "embedding_config": {"model": "fake/embedding"}}
+
+
+def test_rag_that_retrieves_everything_reuses_full_context_requests(make_tester, sent, fake_embedder, tmp_path):
+    make_tester(str(tmp_path / "full")).evaluate()
+    results = make_tester(str(tmp_path / "rag"), rag=RAGConfig()).evaluate()   # 1000-token chunks > 200-token haystack
+    assert len(sent) == 3 and all(r["request_cache_hit"] for r in results)
+
+
+def test_changing_rag_settings_warns_on_overwrite(make_tester, sent, fake_embedder, tmp_path, capsys):
+    make_tester(str(tmp_path / "run")).evaluate()
+    make_tester(str(tmp_path / "run"), rag=SMALL_RAG).evaluate()
+    assert "produced with different settings: rag." in capsys.readouterr().out
+
+
+def test_a_changed_retrieval_method_warns_on_overwrite(make_tester, sent, fake_embedder, tmp_path, capsys, monkeypatch):
+    make_tester(str(tmp_path / "run"), rag=SMALL_RAG).evaluate()
+    monkeypatch.setattr(async_evaluate, "RETRIEVERS", {**RETRIEVERS, "hybrid": {**RETRIEVERS["hybrid"], "lexical": "tfidf"}})
+    make_tester(str(tmp_path / "run"), rag=SMALL_RAG).evaluate()   # same settings, another method
+    assert "produced with different settings: rag." in capsys.readouterr().out
+
+
+def test_a_given_embedder_is_reused(make_tester, sent, monkeypatch, tmp_path):
+    def must_not_load(*args, **kwargs):
+        raise AssertionError("load_embedder was called")
+
+    monkeypatch.setattr(async_evaluate, "load_embedder", must_not_load)
+    embedder = KiasmaEmbedder()
+    tester = make_tester(str(tmp_path / "run"), rag=SMALL_RAG, embedder=embedder)
+    assert tester.embedder is embedder
+    assert all(r["rag"]["needle_retrieved"] for r in tester.evaluate())
+
+
+def test_a_bm25_run_loads_no_embedder(make_tester, sent, monkeypatch, tmp_path):
+    def must_not_load(*args, **kwargs):
+        raise AssertionError("load_embedder was called")
+
+    monkeypatch.setattr(async_evaluate, "load_embedder", must_not_load)
+    bm25 = RAGConfig(chunk_size=100, chunk_overlap=60, top_k=1, embedding_model=None, method="bm25")
+    tester = make_tester(str(tmp_path / "run"), rag=bm25)
+    assert tester.embedder is None
+    results = tester.evaluate()
+    assert all(set(r["rag"]["needle_rank"]) == {"bm25"} and r["rag"]["embedding"]["texts_sent"] == 0 for r in results)
+    (result_file,) = (tmp_path / "run").iterdir()
+    saved = json.loads(result_file.read_text())["rag"]
+    assert saved["method"] == "bm25" and saved["retriever"] == RETRIEVERS["bm25"] and "embedding_config" not in saved
+
+
+def test_a_dense_run_records_its_method(make_tester, sent, fake_embedder, tmp_path):
+    dense = RAGConfig(chunk_size=100, chunk_overlap=60, top_k=1, method="dense")
+    assert all(r["rag"]["needle_retrieved"] for r in make_tester(str(tmp_path / "run"), rag=dense).evaluate())
+    (result_file,) = (tmp_path / "run").iterdir()
+    saved = json.loads(result_file.read_text())["rag"]
+    assert saved["method"] == "dense" and saved["retriever"] == {"similarity": "cosine"}
+    assert saved["embedding_config"] == {"model": "fake/embedding"}

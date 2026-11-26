@@ -5,15 +5,24 @@ export PYTHONPATH="../"
 export TOKENIZERS_PARALLELISM=false
 echo $$
 
+# Dense-only, then lexical-only (BM25) RAG ablations of the hybrid baseline (run_config/*_rag_c1000_k3_*.yaml)
 set -- \
-    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_250.yaml \
-    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_500.yaml \
-    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_1K.yaml \
-    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_2K.yaml \
-    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_4K.yaml \
-    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_8K.yaml \
-    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_16K.yaml \
-    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_32K.yaml
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_dense_c1000_k3_250.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_dense_c1000_k3_500.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_dense_c1000_k3_1K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_dense_c1000_k3_2K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_dense_c1000_k3_4K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_dense_c1000_k3_8K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_dense_c1000_k3_16K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_dense_c1000_k3_32K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_bm25_c1000_k3_250.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_bm25_c1000_k3_500.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_bm25_c1000_k3_1K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_bm25_c1000_k3_2K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_bm25_c1000_k3_4K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_bm25_c1000_k3_8K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_bm25_c1000_k3_16K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_bm25_c1000_k3_32K.yaml
 
 stage=0
 for config in "$@"; do

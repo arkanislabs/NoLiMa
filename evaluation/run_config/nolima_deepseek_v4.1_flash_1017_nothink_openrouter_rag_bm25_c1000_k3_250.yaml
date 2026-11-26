@@ -1,0 +1,22 @@
+# Full NoLiMa run with lexical-only (BM25) RAG: 5 haystacks x 58 tests x 26 depths = 7,540 requests.
+# 250 to 2K equal full context (the haystack fits in top_k chunks), so their generations come from the full-context request cache.
+# Run from evaluation/:
+#   PYTHONPATH=../ TOKENIZERS_PARALLELISM=false uv run python -u run_tests.py --config run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_rag_bm25_c1000_k3_250.yaml
+model_name: "deepseek_v4.1_flash_1017_nothink_openrouter"
+model_configs_dir: "./model_configs/"
+needle_set_path: "../data/needlesets/needle_set.json"
+haystack_dir: "../data/haystack/rand_shuffle"
+parent_results_dir: "./results/deepseek_v4.1_flash_1017_nothink_openrouter_rag_bm25_c1000_k3/CL250/"
+context_length: 250
+document_depth_percent_min: 0
+document_depth_percent_max: 100
+document_depth_percent_intervals: 26
+metric: contains
+use_default_system_prompt: true
+# RAG baseline, lexical only: answer from the top_k chunks of the haystack by BM25 (no embeddings)
+rag:
+  chunk_size: 1000
+  chunk_overlap: 200
+  top_k: 3
+  embedding_model: null
+  method: bm25
