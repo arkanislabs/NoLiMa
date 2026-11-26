@@ -14,19 +14,15 @@ import httpx
 
 from functools import cache
 
-from transformers import AutoTokenizer
-from typing import Union, List
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from typing import Union, List, Optional
 
-from vertexai.preview.tokenization import get_tokenizer_for_model
-import vertexai.preview.generative_models as generative_models
-
-from langchain_aws import ChatBedrockConverse
-
-from google import genai
-from google.genai import types
-from google.genai.errors import ClientError
+# The Gemini (vertexai, google.genai) and AWS (langchain_aws) SDKs are imported where those providers are
+# used: they took about 8 s to import on every run, including runs of other providers
 
 from tenacity import retry, wait_random_exponential, stop_after_delay, retry_if_exception_type, retry_if_exception_message, wait_random
+
+from request_cache import RequestCache, request_key
 
 DEFAULT_TOKENIZER_MAPPING = {
     "gemini": "google",
@@ -36,6 +32,106 @@ DEFAULT_TOKENIZER_MAPPING = {
     "aws": "huggingface"
 }
 
+OPENAI_COMPATIBLE_PROVIDERS = ("openai", "vllm", "azure-openai")
+# Request record fields that select the endpoint rather than being arguments of the SDK call
+ENDPOINT_FIELDS = ("api_provider", "api_url")
+
+
+def uses_plain_rust_decode(tokenizer) -> bool:
+    """
+    Whether the tokenizer's decode is just its Rust tokenizer's decode, so calling the Rust one directly gives the
+    same text: a fast tokenizer that doesn't clean up spaces and whose class (e.g. CodeGen, Whisper, or remote
+    code) doesn't override decoding.
+    """
+    cls = type(tokenizer)
+    return (
+        tokenizer.is_fast
+        and not tokenizer.clean_up_tokenization_spaces
+        and cls.decode is PreTrainedTokenizerFast.decode
+        and cls._decode is PreTrainedTokenizerFast._decode
+    )
+
+
+def build_messages(
+    system_prompt: str,
+    user_prompt: Union[str, List[str]],
+    default_system_prompt: str,
+    add_default_system_prompt: bool = True
+) -> list:
+    """
+    Chat messages for a request: the default system prompt (from the model config) when
+    requested and non-empty, else the given system prompt when non-empty, then the user prompt(s).
+    """
+    if add_default_system_prompt and default_system_prompt != "":
+        messages = [{"role": "system", "content": default_system_prompt}]
+    elif system_prompt != "":
+        messages = [{"role": "system", "content": system_prompt}]
+    else:
+        messages = []
+    for prompt in (user_prompt if isinstance(user_prompt, list) else [user_prompt]):
+        messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def build_request(
+    api_provider: str,
+    api_url: str,
+    model: str,
+    model_config: dict,
+    default_system_prompt: str,
+    messages: list,
+    max_tokens: int,
+    temperature: float,
+    top_p: float
+) -> dict:
+    """
+    The request record: everything that decides the model's answer (provider, endpoint, model and
+    the exact arguments of the SDK call). It is the request cache key, so it never holds API keys,
+    timeouts, retry or tokenizer settings. Numbers are normalized so 0 and 0.0 give the same key.
+    """
+    request = {
+        "api_provider": api_provider,
+        "api_url": api_url.rstrip("/") if isinstance(api_url, str) else api_url,
+        "model": model,
+    }
+    if api_provider in OPENAI_COMPATIBLE_PROVIDERS:
+        request["messages"] = messages
+        request["seed"] = 43
+        if model_config.get("openai_thinking_model", False):
+            request["max_completion_tokens"] = int(max_tokens)
+        else:
+            request["max_tokens"] = int(max_tokens)
+            request["temperature"] = float(temperature)
+            request["top_p"] = float(top_p)
+        # OpenRouter provider routing (e.g. pin to OpenAI) and reasoning settings (e.g. thinking off). Both change
+        # which backend answers or how, so they are part of the key.
+        extra_body = {}
+        if "openrouter_provider" in model_config:
+            extra_body["provider"] = model_config["openrouter_provider"]
+        if "openrouter_reasoning" in model_config:
+            extra_body["reasoning"] = model_config["openrouter_reasoning"]
+        if extra_body:
+            request["extra_body"] = extra_body
+    elif api_provider == "gemini":
+        request["system_instruction"] = default_system_prompt
+        request["contents"] = messages[-1]["content"]
+        request["max_output_tokens"] = int(max_tokens)
+        request["temperature"] = float(temperature)
+        request["top_p"] = float(top_p)
+        request["thinking_budget"] = model_config.get("thinking_budget")
+        request["seed"] = 43
+    elif api_provider == "aws":
+        # Bedrock sampling is fixed when the client is created (from the model config), not per call
+        request["messages"] = messages
+        request["max_tokens"] = int(model_config["max_tokens"])
+        request["temperature"] = float(model_config["temperature"])
+        request["top_p"] = float(model_config["top_p"])
+        request["region"] = model_config["region"]
+    else:
+        raise ValueError(f"Invalid API provider: {api_provider}")
+    return request
+
+
 class APIConnector:
     def __init__(
         self,
@@ -43,18 +139,22 @@ class APIConnector:
         api_url: str,
         api_provider: str,
         model: str,
+        cache: Optional[RequestCache] = None,
         **kwargs
     ) -> None:
         """
         APIConnector class to unify the API calls for different API providers
-        
+
         Parameters:
             api_key (`str`): API Key for the API
             api_url (`str`): API URL for the API
             api_provider (`str`): API Provider (openai, gemini, aws, vllm, azure-openai, etc.)
             model (`str`): Model name to use for the API
+            cache (`RequestCache`, optional): Serve identical requests from this cache instead of the API
         """
         self.api_provider = api_provider
+        self.api_url = api_url
+        self.cache = cache
 
         if "tokenizer_type" in kwargs:
             self.tokenizer_type = kwargs["tokenizer_type"]
@@ -68,9 +168,11 @@ class APIConnector:
             
         if self.tokenizer_type == "huggingface":
             self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_model, use_fast=True)
+            self._hf_fast_decode = uses_plain_rust_decode(self.tokenizer)
         elif self.tokenizer_type == "tiktoken":
             self.tokenizer = tiktoken.get_encoding(self.tokenizer_model)
         elif self.tokenizer_type == "google":
+            from vertexai.preview.tokenization import get_tokenizer_for_model
             self.tokenizer = get_tokenizer_for_model(self.tokenizer_model)
         else:
             raise ValueError(f"Invalid tokenizer type: {self.tokenizer_type}")
@@ -96,6 +198,8 @@ class APIConnector:
                 timeout=kwargs["timeout"]
             )
         elif api_provider == "gemini":
+            from google import genai
+            from google.genai import types
             self.api = genai.Client(
                 vertexai=True, project=kwargs["project_ID"], location=kwargs["location"], http_options=types.HttpOptions(timeout=kwargs["http_timeout"] * 1000)
             )
@@ -108,6 +212,7 @@ class APIConnector:
             }
 
         elif api_provider == "aws":
+            from langchain_aws import ChatBedrockConverse
             self.api = ChatBedrockConverse(
                 model=model,
                 temperature=kwargs["temperature"],
@@ -149,6 +254,11 @@ class APIConnector:
             `str`: Decoded text
         """
         if self.tokenizer_type == "huggingface":
+            # The Rust tokenizer directly: transformers' decode first type-checks every token id in Python
+            # (to_py_obj), which took over 90% of a fully cached run. Same text unless the tokenizer cleans
+            # up spaces, so those keep the transformers path (a different prompt would miss the request cache).
+            if self._hf_fast_decode:
+                return self.tokenizer.backend_tokenizer.decode(tokens, skip_special_tokens=False)
             return self.tokenizer.decode(tokens)
         elif self.tokenizer_type == "tiktoken":
             return self.tokenizer.decode(tokens)
@@ -200,47 +310,28 @@ class APIConnector:
         Returns:
             `dict`: Response from the API that includes the response, prompt tokens count, completion tokens count, total tokens count, and stopping reason
         """
-        if add_default_system_prompt and self.SYSTEM_PROMPT != "":
-            messages = [
-                {
-                    "role": "system",
-                    "content": self.SYSTEM_PROMPT
-                }
-            ]
-        elif system_prompt != "":
-            messages = [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                }
-            ]
+        messages = build_messages(system_prompt, user_prompt, self.SYSTEM_PROMPT, add_default_system_prompt)
+        request = build_request(
+            self.api_provider, self.api_url, self.model, self.model_config, self.SYSTEM_PROMPT,
+            messages, max_tokens, temperature, top_p
+        )
+        if self.cache is not None:
+            output, cache_hit = await self.cache.fetch(request, self._send)
         else:
-            messages = []
-        if isinstance(user_prompt, list):
-            for prompt in user_prompt:
-                messages.append({
-                    "role": "user",
-                    "content": prompt
-                })
-        else:
-            messages.append({
-                "role": "user",
-                "content": user_prompt
-            })
-        if self.api_provider == "openai" or self.api_provider == "vllm" or self.api_provider == "azure-openai":
+            output, cache_hit = await self._send(request), False
+        return {**output, "request_hash": request_key(request), "request_cache_hit": cache_hit}
+
+    async def _send(self, request: dict) -> dict:
+        """
+        Sends a request record (see `build_request`) to the provider
+
+        Returns:
+            `dict`: Response from the API that includes the response, prompt tokens count, completion tokens count, total tokens count, and stopping reason
+        """
+        if self.api_provider in OPENAI_COMPATIBLE_PROVIDERS:
             @retry(reraise=True, wait=wait_random(1, 20), retry=retry_if_exception_type(RateLimitError), stop=stop_after_delay(300))
             async def generate_content():
-                params = {
-                    "model": self.model,
-                    "messages": messages,
-                    "seed": 43
-                }
-                if self.model_config.get("openai_thinking_model", False):
-                    params["max_completion_tokens"] = max_tokens
-                else:
-                    params["max_tokens"] = max_tokens
-                    params["temperature"] = temperature
-                    params["top_p"] = top_p
+                params = {k: v for k, v in request.items() if k not in ENDPOINT_FIELDS}
 
                 completion = await self.api.chat.completions.create(
                     **params
@@ -251,30 +342,39 @@ class APIConnector:
             
 
             output = {
-                "response": completion.choices[0].message.content,
+                # content is None when reasoning uses the whole max_tokens budget (finish_reason "length");
+                # treat it as an empty (wrong) answer instead of crashing the scorer
+                "response": completion.choices[0].message.content or "",
                 "prompt_tokens": completion.usage.prompt_tokens,
                 "completion_tokens": completion.usage.completion_tokens,
                 "total_tokens": completion.usage.total_tokens,
                 "finish_reason": completion.choices[0].finish_reason,
                 "cached_tokens": completion.usage.prompt_tokens_details.cached_tokens if completion.usage.prompt_tokens_details else None,
+                "reasoning_tokens": completion.usage.completion_tokens_details.reasoning_tokens if completion.usage.completion_tokens_details else None,
+                # USD cost; only some providers (e.g. OpenRouter) report it
+                "cost": getattr(completion.usage, "cost", None),
+                # Backend that served the request (OpenRouter only), to check provider pinning held
+                "provider": getattr(completion, "provider", None),
+                "system_fingerprint": getattr(completion, "system_fingerprint", None),
             }
-            if self.model_config.get("openai_thinking_model", False):
-                output["reasoning_tokens"] = completion.usage.completion_tokens_details.reasoning_tokens
             return output
 
         elif self.api_provider == "gemini":
+            from google.genai import types
+            from google.genai.errors import ClientError
+
             @retry(reraise=True, wait=wait_random_exponential(multiplier=self.gemini_retry_config["multiplier"], max=self.gemini_retry_config["maximum"]), stop=stop_after_delay(self.gemini_retry_config["timeout"]), retry=retry_if_exception_type((ClientError, httpx.ConnectTimeout, httpx.TimeoutException)))
             async def generate_content():
                 completion = await self.api.aio.models.generate_content(
-                    model=self.model,
-                    contents=messages[-1]["content"],
+                    model=request["model"],
+                    contents=request["contents"],
                     config=types.GenerateContentConfig(
-                        system_instruction=self.SYSTEM_PROMPT,
-                        temperature=temperature,
-                        top_p=top_p,
-                        max_output_tokens=max_tokens,
-                        thinking_config=types.ThinkingConfig(thinking_budget=self.model_config["thinking_budget"]) if "thinking_budget" in self.model_config else None,
-                        seed=43
+                        system_instruction=request["system_instruction"],
+                        temperature=request["temperature"],
+                        top_p=request["top_p"],
+                        max_output_tokens=request["max_output_tokens"],
+                        thinking_config=types.ThinkingConfig(thinking_budget=request["thinking_budget"]) if request["thinking_budget"] is not None else None,
+                        seed=request["seed"]
 
                     )
                 )
@@ -294,7 +394,7 @@ class APIConnector:
         elif self.api_provider == "aws":
             @retry(reraise=True, wait=wait_random(5, 20), retry=retry_if_exception_message(match=r".*ThrottlingException.*"))
             async def generate_content():
-                completion = await self.api.ainvoke(messages)
+                completion = await self.api.ainvoke(request["messages"])
                 return completion
             
             completion = await generate_content()
@@ -308,4 +408,3 @@ class APIConnector:
             }
         else:
             raise ValueError(f"Invalid API provider: {self.api_provider}")
-

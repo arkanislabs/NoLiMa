@@ -7,19 +7,48 @@
 
 import os
 import json
-from typing import Union
+from typing import Optional, Union
 from tqdm import tqdm
-import time
 import asyncio
-import hashlib
-from copy import deepcopy
 
 import numpy as np
 
 from async_api_connector import APIConnector
+from env_utils import load_env, expand_env_vars, redact_secrets
+from request_cache import RequestCache, DEFAULT_REQUEST_CACHE_DIR, cost_summary, write_json_atomic
 
 from jsonargparse import ArgumentParser, ActionConfigFile
 from data.book_haystack import BookHaystack
+
+
+def result_file_name(model_name: str, test_name: str, haystack_path: str, context_length: int) -> str:
+    """
+    Name (without .json) of a test's result file: the same test, haystack and context length always
+    map to the same file, so a re-run overwrites it instead of adding a duplicate.
+    """
+    haystack_name = os.path.splitext(os.path.basename(haystack_path))[0]
+    return "_".join(part for part in (model_name, "book", test_name, haystack_name, f"CL{context_length}") if part)
+
+
+# Not test settings: the name, the outcome, and the model config (changing it and re-running is expected)
+_NOT_SETTINGS = {"eval_name", "results", "model_config"}
+
+
+def changed_settings(existing_path: str, outputs: dict) -> list:
+    """
+    Top-level settings (needle, haystack path, depths, seed, ...) that differ between an existing result
+    file and the one about to replace it. The file name only encodes model, test, haystack file name and
+    context length, so a different experiment pointed at the same folder would replace it silently.
+    """
+    try:
+        with open(existing_path, "r") as file:
+            existing = json.load(file)
+    except (OSError, ValueError):
+        return []
+    new = json.loads(json.dumps(outputs))  # compare as stored (e.g. tuples become lists)
+    keys = (set(existing) | set(new)) - _NOT_SETTINGS
+    return sorted(key for key in keys if existing.get(key) != new.get(key))
+
 
 class NoLiMa_Tester:
     def __init__(
@@ -45,21 +74,39 @@ class NoLiMa_Tester:
         test_name: str = "",
         log_placements_dir: str = "",
         metric: str = "EM",
-        prevent_duplicate: bool = True,
-        distractor: Union[str, None] = None
+        distractor: Union[str, None] = None,
+        request_cache_dir: str = DEFAULT_REQUEST_CACHE_DIR,
+        use_request_cache: bool = True,
+        api_connector: Optional[APIConnector] = None,
+        haystack: Optional[BookHaystack] = None
     ) -> None:
+        """
+        `api_connector` and `haystack`, when given, are reused instead of built: loading a tokenizer takes
+        about a second and tokenizing a book (done by its first test) a second or two, which would otherwise
+        repeat for every test even when all requests are cached. `api_connector` must come from the same model
+        config (request_cache_dir and use_request_cache are then ignored), and `haystack` must be the book at
+        `haystack_path`, tokenized (if at all) with that connector's tokenizer.
+        """
         self.model_name = model_name
         self.model_config_path = os.path.join(model_configs_dir, model_name + ".json")
 
         if not os.path.exists(self.model_config_path):
             raise FileNotFoundError(f"Model configuration for {model_name} not found in {model_configs_dir}")
         
+        load_env()
         with open(self.model_config_path, "r") as file:
-            self.model_config = json.load(file)
+            raw_model_config = json.load(file)
+        # Logged in each result file: ${VAR} references stay unexpanded and literal secrets are redacted
+        self.logged_model_config = redact_secrets(raw_model_config)
+        self.model_config = expand_env_vars(raw_model_config, source=self.model_config_path)
 
-        self.api_connector = APIConnector(
-            **self.model_config
-        )
+        # Identical requests (from this or any earlier run) are answered from the request cache
+        if api_connector is None:
+            api_connector = APIConnector(
+                cache=RequestCache(request_cache_dir) if use_request_cache else None,
+                **self.model_config
+            )
+        self.api_connector = api_connector
 
         self.needle = needle
         if gold_answers != "":
@@ -87,8 +134,12 @@ class NoLiMa_Tester:
         
         self.haystack_path = haystack_path
 
-        self.haystack = BookHaystack(self.haystack_path)
-        
+        if haystack is None:
+            haystack = BookHaystack(self.haystack_path)
+        elif not os.path.samefile(haystack.book_path, haystack_path):
+            raise ValueError(f"haystack is the book at {haystack.book_path}, not haystack_path {haystack_path}")
+        self.haystack = haystack
+
         self.results_dir = results_dir
         os.makedirs(results_dir, exist_ok=True)
 
@@ -101,14 +152,13 @@ class NoLiMa_Tester:
         self.static_depth = static_depth
         self.metric = metric
         self.seed = seed
-        self.prevent_duplicate = prevent_duplicate
         self.distractor = distractor
         
         self.log_placements = log_placements_dir != ""
         self.log_placements_dir = log_placements_dir
 
         self.test_name = test_name
-        self.eval_name = f"{model_name}_book_{test_name}_{int(time.time())}" if test_name != "" else f"{model_name}_book_{int(time.time())}"
+        self.eval_name = result_file_name(model_name, test_name, haystack_path, context_length)
 
     
     def _evaluate_response(self, response: str, gold_answers = None) -> int:
@@ -125,16 +175,13 @@ class NoLiMa_Tester:
         else:
             raise ValueError(f"Invalid metric: {self.metric}")
 
-    def get_hash(self, test_config: dict) -> str:
-        if "test_hash" in test_config:
-            return test_config["test_hash"]
-        new_config = deepcopy(test_config)
-        del new_config["results"]
-        del new_config["eval_name"]
-        return hashlib.sha256(json.dumps(new_config, sort_keys=True).encode()).hexdigest()
-        
-
-    def evaluate(self) -> None:
+    def evaluate(self, progress: Optional[tqdm] = None) -> list:
+        """
+        Runs the test, (over)writes its result file and returns the per-request results. Requests
+        already in the request cache are not sent again, so re-running a test only pays for what is missing.
+        `progress`, when given, is advanced by one as each request finishes and receives this test's messages.
+        """
+        write = progress.write if progress is not None else print
         np.random.seed(self.seed)
         outputs = {
             "eval_name": self.eval_name,
@@ -164,25 +211,12 @@ class NoLiMa_Tester:
         }
         if self.distractor is not None:
             outputs["distractor"] = self.distractor
-        outputs["test_hash"] = self.get_hash(outputs)
+        # Logged so the report can show the settings the results were produced with
+        outputs["model_config"] = self.logged_model_config
         results_path = os.path.join(self.results_dir, f"{self.eval_name}.json")
-        if os.path.exists(results_path):
-            print(f"Results already exist at {results_path}")
-            print("Skipping evaluation")
-            return
-        
-        if self.prevent_duplicate:
-            for result_filename in os.listdir(self.results_dir):
-                with open(os.path.join(self.results_dir, result_filename), "r") as file:
-                    other_result = json.load(file)
 
-                if outputs["test_hash"] == self.get_hash(other_result):
-                    print(f"Duplicate test found with similar hash at {self.results_dir} -- TEST_HASH:", outputs["test_hash"])
-                    print("Skipping evaluation")
-                    return
-        
         async_tasks = []
-        for i in tqdm(np.linspace(self.document_depth_percent_min, self.document_depth_percent_max, self.document_depth_percent_intervals)):
+        for i in (np.linspace(self.document_depth_percent_min, self.document_depth_percent_max, self.document_depth_percent_intervals)):
             needle_depth = i / 100
             api_output = {}
             if "{CHAR}" in self.needle:
@@ -230,20 +264,41 @@ class NoLiMa_Tester:
                 with open(placement_log_path, "w") as file:
                     file.write(placement_output["text"])
 
+        async def tick(task):
+            try:
+                return await task
+            finally:
+                if progress is not None:
+                    progress.update(1)
+
         loop = asyncio.get_event_loop()
 
-        responses = loop.run_until_complete(asyncio.gather(*async_tasks))
+        # Let every request finish before failing on one: each response is cached as it arrives,
+        # so a re-run only pays for the requests that failed
+        responses = loop.run_until_complete(asyncio.gather(*map(tick, async_tasks), return_exceptions=True))
+        errors = [response for response in responses if isinstance(response, BaseException)]
+        if errors:
+            raise errors[0]
 
-        for i in tqdm(range(len(responses))):
+        for i in range(len(responses)):
             outputs["results"][i]["metric"] = self._evaluate_response(responses[i]["response"], gold_answers=[outputs["results"][i]["selected_character"]]) if "{CHAR}" in self.needle else self._evaluate_response(responses[i]["response"])
             for k, v in responses[i].items():
                 outputs["results"][i][k] = v
             
-        # Save results by model name, haystack type, timestamp
-        with open(results_path, "w") as file:
-            json.dump(outputs, file, indent=4)
+        # One file per model, test, haystack and context length; written atomically so a crash keeps the previous version
+        if os.path.exists(results_path):
+            changed = changed_settings(results_path, outputs)
+            if changed:
+                write(f"Warning: overwriting {results_path}, which was produced with different settings: {', '.join(changed)}. "
+                      "Use a separate parent_results_dir to keep both.")
+            elif progress is None:
+                print(f"Overwriting {results_path}")
+        write_json_atomic(results_path, outputs, indent=4)
         
-        print(f"Results saved at {results_path}")
+        if progress is None:
+            print(f"Results saved at {results_path}")
+            print(cost_summary(outputs["results"]))
+        return outputs["results"]
 
     
 
@@ -272,6 +327,8 @@ if __name__ == "__main__":
     parser.add_argument("--test_name", type=str, default="", help="Name of the test")
     parser.add_argument("--seed", type=int, default=42, help="Seed for random character selection")
     parser.add_argument("--distractor", type=str, default="", help="Distractor text placed in the haystack")
+    parser.add_argument("--request_cache_dir", type=str, default=DEFAULT_REQUEST_CACHE_DIR, help="Directory of the LLM request cache, shared by all runs")
+    parser.add_argument("--use_request_cache", type=bool, default=True, help="Answer identical requests from the request cache instead of the API")
 
     args = parser.parse_args()
 
@@ -294,6 +351,8 @@ if __name__ == "__main__":
         metric=args.metric,
         seed=args.seed,
         distractor=args.distractor if args.distractor != "" else None,
+        request_cache_dir=args.request_cache_dir,
+        use_request_cache=args.use_request_cache,
     )
 
     tester.evaluate()

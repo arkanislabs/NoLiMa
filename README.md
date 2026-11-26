@@ -72,10 +72,13 @@ Below are the general steps to evaluate models, whether serving them locally or 
 
 ---
 ### 1. Installing Requirements
-Install the required packages by running:
+Dependencies are managed with [uv](https://docs.astral.sh/uv/getting-started/installation/) (install it first). Then, from the repository root:
 ```bash
-pip install -r requirements.txt
+make install        # API-based models (OpenAI, Azure OpenAI, Gemini/Vertex AI, AWS Bedrock)
+make install-local  # also installs vllm for locally served models (Linux + NVIDIA GPU)
+source .venv/bin/activate
 ```
+Both commands create a Python 3.12 environment in `.venv` from the pinned versions in `uv.lock`. `make install` keeps the environment in sync with the core dependencies, so running it after `make install-local` removes vllm.
 
 ### 2. Downloading Data
 Download the NoLiMa dataset by running:
@@ -99,6 +102,15 @@ The needle set and haystack data will be downloaded to the `data` directory from
 
 ### 3B. API-Based Models
 
+- **Provide your API keys in a `.env` file**  
+  - Copy the template and fill in the keys you need (`.env` is git-ignored):
+    ```bash
+    cp .env.example .env
+    ```
+  - Model configs reference keys as `${VAR_NAME}` (e.g. `"api_key": "${OPENROUTER_API_KEY}"`). The values are filled in from the environment when the config is loaded, and variables already exported in your shell take precedence over `.env`. A missing variable stops the run with an error that names it.
+  - For OpenRouter, set `OPENROUTER_API_KEY` (and `HF_TOKEN` for gated Hugging Face tokenizers such as `meta-llama/*`), then use `evaluation/model_configs/deepseek_v4.1_flash_1017_openrouter.json` as a starting point.
+  - To pin OpenRouter to a provider, add `"openrouter_provider"` to the model config. It is sent as OpenRouter's [`provider` routing object](https://openrouter.ai/docs/features/provider-routing), e.g. `{"only": ["openai"], "allow_fallbacks": false, "require_parameters": true}`, and is part of the request cache key. Each per-request result records the `provider` that served it and its `system_fingerprint`, so you can check the pin held. `gpt_4o_mini_openrouter.json` (`openai/gpt-4o-mini`) is pinned to OpenAI and `deepseek_v4.1_flash_1017_nothink_openrouter.json` to Cloudflare; their run configs are `evaluation/run_config/nolima_<model>_<length>.yaml`.
+  - To control reasoning on OpenRouter, add `"openrouter_reasoning"` to the model config. It is sent as OpenRouter's [`reasoning` object](https://openrouter.ai/docs/use-cases/reasoning-tokens), e.g. `{"enabled": false}` to turn thinking off or `{"effort": "high"}`, and is part of the request cache key. `deepseek_v4.1_flash_1017_nothink_openrouter.json` runs DeepSeek V4.1 Flash (1017 snapshot) with thinking off, pinned to Cloudflare, with the paper's non-reasoning settings (192 max tokens, greedy decoding). Its run configs follow the same `nolima_<model>_<length>.yaml` pattern.
 - **Create or modify a model configuration for your API-based service**  
   - For example, use the existing config templates in the `evaluation/model_configs` folder.  
   - Note that some APIs may require additional credentials or authentication (AWS, Google Auth, etc.).
@@ -117,9 +129,22 @@ The needle set and haystack data will be downloaded to the `data` directory from
    ./run_tests.sh
    ```
 3. **Collect the results**
-    - All outputs are automatically saved to the results directory specified in each run_config file.
+    - All outputs are automatically saved under the `parent_results_dir` of each run_config file: one file per test, haystack and context length, `<parent_results_dir>/<test>/<model>_book_<test>_<haystack>_CL<length>.json`.
+    - Re-running a config overwrites these files. Requests already in the request cache (below) are not sent again, so re-running, or resuming an interrupted run, only pays for requests that aren't cached yet; a changed model config (e.g. `max_tokens`) runs the new settings. Two exceptions: with `use_request_cache: false` every request is sent again, and results produced before the request cache existed aren't in it, so re-running their config sends all of their requests again (use `test_names` / `haystack_files` to run only what is missing).
+    - The file name only covers model, test, haystack file name and context length. Any other change (needle set, `haystack_dir`, depth settings, seed, metric) needs its own `parent_results_dir`; otherwise the new results replace the old ones, with a warning naming the settings that differ.
+    - Each run prints its cost per test and in total: **current** is what the requests sent to the API cost, **total** also counts the requests answered from the request cache (at the price recorded when they were first sent).
+
+#### Request cache
+- Every LLM request is cached on disk, independently of the results, in `evaluation/results/request_cache/` (set `request_cache_dir` in a run config to move it). An identical request, from this run or any earlier one, is answered from the cache and not sent or paid for again.
+- A request is identified by the SHA-256 of its *request record*: provider, endpoint, model and the exact call arguments (messages, `max_tokens`, `temperature`, `top_p`, seed, ...). API keys, timeouts, retry and tokenizer settings are not part of it.
+- Each entry is one JSON file, `<model>/<hash[:2]>/<hash>.json`, holding the request record and the response, including its reported cost. Texts longer than 2,000 characters (the haystack prompt) are stored as a SHA-256 digest with the first and last 200 characters.
+- Each per-request result records `request_hash` (the entry's file name) and `request_cache_hit`.
+- To send requests again, delete their entries (or a whole model folder). To bypass the cache for a run, set `use_request_cache: false`.
+- Responses with `finish_reason: "error"` are not cached, and when a request fails, the responses that did arrive are already cached, so a re-run only sends the failed requests.
+- Result files from before re-runs overwrote results have a timestamp in their name and are never overwritten, and their prompts are not in the cache. Delete them, or move them outside `evaluation/results/`, before re-running into the same folder: `gather_results` groups files by the `result_dir` recorded inside each file, not by where the file sits, so leftover old files make the report count those tests twice (it warns when it sees this).
 4. **Gathering the results**
-    - Using the `evaluation/gather_results.ipynb` notebook, you can easily gather the results from the output files and generate a csv file containing the accuracy of each test.
+    - Run `make gather-results` (or `python evaluation/gather_results.py [RESULTS_DIR ...]`) to gather the results from the output files into `evaluation/results/gathered_results.csv`, containing the accuracy of each test.
+    - The same command writes `evaluation/results/report.md`: per run, the score at each context length, the base score, threshold and effective length (as defined above), per-test scores, cut-off answers, cost and the model config. Cost is shown as **current** (requests sent to the API when the results were produced) and **total** (also counting requests answered from the request cache); the CSV has the matching `current_cost`, `total_cost` and `n_request_cache_hits` columns. The request cache directory is skipped. Each result file also records the model config it was run with (`${VAR}` references are kept unexpanded and literal secrets are redacted).
 
 ### Additional Notes
 You can find various needle sets (e.g., CoT-style, multiple choice, direct, distractor-included) in `data/needlesets`.

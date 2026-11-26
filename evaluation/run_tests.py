@@ -7,7 +7,7 @@
 
 import os
 import json
-from typing import Union
+from typing import List, Optional, Union
 from tqdm import tqdm
 import time
 from copy import copy
@@ -15,6 +15,8 @@ from copy import copy
 from jsonargparse import ArgumentParser, ActionConfigFile
 
 from async_evaluate import NoLiMa_Tester
+from request_cache import DEFAULT_REQUEST_CACHE_DIR, cost_summary, current_cost
+from data.book_haystack import BookHaystack
 
 DEFAULT_TASK_TEMPLATE = "You will answer a question based on the following book snippet:\n\n{haystack}\n\nUse the information provided in the book snippet to answer the question. Your answer should be short and based on either explicitly stated facts or strong, logical inferences.\n\nQuestion: {question}\n\n Return only the final answer with no additional explanation or reasoning."
 
@@ -37,7 +39,11 @@ if __name__ == "__main__":
     parser.add_argument("--metric", type=str, default="EM", help="Evaluation metric")
     parser.add_argument("--log_placements_dir", type=str, default="", help="Directory to save needle placements for debugging")
     parser.add_argument("--base_seed", type=int, default=42, help="Base seed for random character selection")
-    parser.add_argument("--prevent_duplicate_tests", type=bool, default=True, help="Prevent duplicate tests")
+    parser.add_argument("--test_names", type=Optional[List[str]], default=None, help="Run only these tests, named <exp_id>_<test_id>_<question_type> (e.g. 0401_T17_C02_onehop); default runs all")
+    parser.add_argument("--haystack_files", type=Optional[List[str]], default=None, help="Run only these files from haystack_dir (e.g. rand_book_1.txt); default runs all")
+    parser.add_argument("--request_cache_dir", type=str, default=DEFAULT_REQUEST_CACHE_DIR, help="Directory of the LLM request cache, shared by all runs")
+    parser.add_argument("--use_request_cache", type=bool, default=True, help="Answer identical requests from the request cache instead of the API")
+    parser.add_argument("--progress_label", type=str, default="", help="Prefix for the progress bar, e.g. the stage of a multi-run script ([2/5])")
 
     args = parser.parse_args()
 
@@ -78,12 +84,40 @@ if __name__ == "__main__":
                 tests[-1]["retrieval_question"] = full_question
                 tests[-1]["distractor"] = full_distractor
 
+    if args.test_names is not None:
+        unknown_tests = set(args.test_names) - {test["test_name"] for test in tests}
+        if unknown_tests:
+            raise ValueError(f"Unknown test_names (not in {args.needle_set_path}): {sorted(unknown_tests)}")
+        tests = [test for test in tests if test["test_name"] in args.test_names]
+
     haystacks = os.listdir(args.haystack_dir)
+    if args.haystack_files is not None:
+        unknown_haystacks = set(args.haystack_files) - set(haystacks)
+        if unknown_haystacks:
+            raise ValueError(f"Unknown haystack_files (not in {args.haystack_dir}): {sorted(unknown_haystacks)}")
+    selected_haystacks = [h for h in haystacks if args.haystack_files is None or h in args.haystack_files]
+    n_runs = len(selected_haystacks) * len(tests)
+    label = f"{args.progress_label} CL{args.context_length}".strip()
+    print(f"{label}: {args.model_name}, {len(selected_haystacks)} haystacks x {len(tests)} tests x "
+          f"{args.document_depth_percent_intervals} depths = {n_runs * args.document_depth_percent_intervals} requests")
+    progress = tqdm(total=n_runs * args.document_depth_percent_intervals, desc=label, unit="req", dynamic_ncols=True)
+    run_no = 0
+    spent = 0.0
+    all_results = []
+    # Built by the first test and reused by the rest: reloading the tokenizer and re-tokenizing each book
+    # for every test took most of the time of a run whose requests were all cached
+    api_connector = None
     for haystack_no, haystack in enumerate(haystacks):
+        # Filter inside the loop so haystack_no, and therefore the seed, matches a full run
+        if haystack not in selected_haystacks:
+            continue
         haystack_path = os.path.join(args.haystack_dir, haystack)
         haystack_name = haystack.split(".")[0]
+        book = BookHaystack(haystack_path)  # tokenized by its first test
 
         for test in tests:
+            run_no += 1
+            progress.set_postfix_str(f"test {run_no}/{n_runs} {haystack_name} {test['test_name']} | spent ${spent:.4f}")
             tester = NoLiMa_Tester(
                 model_name=args.model_name,
                 model_configs_dir=args.model_configs_dir,
@@ -106,9 +140,18 @@ if __name__ == "__main__":
                 log_placements_dir=args.log_placements_dir,
                 test_name=test["test_name"],
                 seed=test["seed"] + haystack_no,
-                prevent_duplicate=args.prevent_duplicate_tests,
-                distractor=test["distractor"]
+                distractor=test["distractor"],
+                request_cache_dir=args.request_cache_dir,
+                use_request_cache=args.use_request_cache,
+                api_connector=api_connector,
+                haystack=book
             )
+            api_connector = tester.api_connector
 
-            tester.evaluate()
+            results = tester.evaluate(progress=progress)
+            spent += sum(c for c in map(current_cost, results) if c is not None)
+            all_results += results
+    progress.close()
+
+    print(f"{label} done. {cost_summary(all_results)}")
 

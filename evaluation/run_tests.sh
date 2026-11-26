@@ -1,10 +1,22 @@
+# Config and data paths are relative to evaluation/, so run from there regardless of the caller's cwd
+cd "$(dirname "$0")" || exit 1
 export PYTHONPATH="../"
+# The HF tokenizer runs before the process forks; disable its threads to silence the fork warning
+export TOKENIZERS_PARALLELISM=false
 echo $$
-python -u run_tests.py --config run_config/multi_test_config_book_250.yaml
-python -u run_tests.py --config run_config/multi_test_config_book_500.yaml
-python -u run_tests.py --config run_config/multi_test_config_book_1K.yaml
-python -u run_tests.py --config run_config/multi_test_config_book_2K.yaml
-python -u run_tests.py --config run_config/multi_test_config_book_4K.yaml
-python -u run_tests.py --config run_config/multi_test_config_book_8K.yaml
-python -u run_tests.py --config run_config/multi_test_config_book_16K.yaml
-python -u run_tests.py --config run_config/multi_test_config_book_32K.yaml
+
+set -- \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_250.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_500.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_1K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_2K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_4K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_8K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_16K.yaml \
+    run_config/nolima_deepseek_v4.1_flash_1017_nothink_openrouter_32K.yaml
+
+stage=0
+for config in "$@"; do
+    stage=$((stage + 1))
+    python -u run_tests.py --config "$config" --progress_label "[$stage/$#]"
+done
